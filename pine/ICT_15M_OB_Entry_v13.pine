@@ -1,5 +1,5 @@
 //@version=6
-strategy("ICT 15M OB Entry v12 - alertas + doble zona", overlay=true,
+strategy("ICT 15M OB Entry v13 - lock 0.8R", overlay=true,
      initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
      calc_on_every_tick=false, process_orders_on_close=true,
      commission_type=strategy.commission.cash_per_contract, commission_value=0.0)
@@ -20,11 +20,17 @@ strategy("ICT 15M OB Entry v12 - alertas + doble zona", overlay=true,
 //       (Las alertas reales se configuran desde el indicador gemelo
 //       "ICT 15M OB Alertas", porque TradingView no permite elegir
 //       alertcondition() en scripts de tipo strategy().)
+// v13 — lockR sube de 0.5R a 0.8R. Validado sobre el histórico completo
+//       reconstruido (136.049 velas de 15M, 2020-11 a 2026-09) con el modelo
+//       de ejecución realista (bot por cierre de vela + slippage + comisión):
+//       $129.295 vs $122.328 con 0.5R, con MENOR drawdown (-$2.715 vs
+//       -$3.093) y MENOS meses negativos (3 vs 4). Mejora en las tres
+//       dimensiones a la vez, no es un trade-off.
+//       Se descartó 0.9R: da más dinero pero sube a 5 meses negativos.
+//       Se descartó 1.2R: es un artefacto (el stop quedaría a 0 puntos del
+//       disparador); su ventaja se desploma -19,9% al modelar ejecución por
+//       cierre de vela. Ver /data/engine y /docs/ANALYSIS_LOG.md.
 // ============================================================
-//
-// FINALIZADO — no modificar directamente. Cualquier ajuste o análisis nuevo
-// se hace en un script/indicador aparte (ver /pine/ICT_15M_OB_Alertas.pine
-// y /docs para el historial de decisiones).
 
 startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
 endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
@@ -43,7 +49,7 @@ rr2            = input.float(4.0, "TP2 R multiple (cierra el contrato restante)"
 useRiskCap     = input.bool(true, "Descartar señal si el stop supera el tope de riesgo")
 maxRiskPts     = input.float(100.0, "Tope máximo de riesgo por operación (puntos)", minval=10)
 beTriggerR     = input.float(1.2, "Activar protección al alcanzar este múltiplo de R (0 = desactivado)", minval=0, maxval=2)
-lockR          = input.float(0.5, "Ganancia a asegurar en ese punto (0 = breakeven puro, no debe superar beTriggerR)", minval=0, maxval=2)
+lockR          = input.float(0.8, "Ganancia a asegurar en ese punto (0 = breakeven puro, no debe superar beTriggerR)", minval=0, maxval=2)
 showZones      = input.bool(true, "Mostrar zona del OB puro (solo visual)")
 showWideZone   = input.bool(true, "Mostrar zona ampliada OB + margen de entrada (solo visual)")
 showLevels     = input.bool(true, "Mostrar SL/TP1/TP2 proyectados mientras la zona está activa (solo visual)")

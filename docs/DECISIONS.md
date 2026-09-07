@@ -38,3 +38,33 @@ reabrir debates ya resueltos en sesiones futuras.
   datos retrasado — símbolo `CME_MINI_DL:MNQ1!`, sufijo `_DL`). El usuario
   planea una suscripción de datos en tiempo real vía su cuenta fondeada —
   pendiente re-testear una vez activa.
+
+## Actualización 2026-09-08 — lockR 0.5R → 0.8R (v13)
+
+Tras reconstruir el histórico completo (136.049 velas, 2020-11 a 2026-09) y
+someterlo a tres pruebas de robustez que nunca se habían corrido, se cambió
+`lockR` de 0.5R a **0.8R**.
+
+**Por qué 0.8R gana** (modelo realista: bot por cierre de vela + slippage 1
+tick + comisión):
+
+| | 0.5R | **0.8R** | 0.9R |
+|---|---|---|---|
+| Neto 5.8 años | $122.328 | **$129.295** | $133.059 |
+| Max drawdown | -$3.093 | **-$2.715** | -$2.715 |
+| Meses negativos | 4/71 | **3/71** | 5/71 |
+
+0.8R mejora en las tres dimensiones a la vez frente a 0.5R — no es un
+trade-off. 0.9R se descartó porque da más dinero pero sube a 5 meses
+negativos: más beneficio a costa de consistencia.
+
+**El 1.2R queda confirmado como artefacto.** Al pasar del modelo tick al
+modelo por cierre de vela se desploma -19,9% ($167.257 → $133.922), mientras
+0.5R apenas cae -3,3%. La causa es geométrica: a 1.2R el stop queda a 0
+puntos del disparador (imposible de ejecutar); a 0.8R quedan 14,7 puntos de
+margen real. Esto valida la decisión original de no ir al máximo.
+
+**Hallazgo metodológico importante:** el ~9% de la ganancia bruta venía de
+que el motor daba el beneficio de la duda en la vela de ENTRADA (usaba el low
+para entrar y el high para el TP de la misma vela, sin saber el orden real).
+Todos los números arriba ya corrigen eso.
