@@ -1,0 +1,380 @@
+//@version=6
+strategy("ICT 15M OB Entry v12 - alertas + doble zona", overlay=true,
+     initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
+     calc_on_every_tick=false, process_orders_on_close=true,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0)
+
+// ============================================================
+// v6 — BREAKEVEN ANTICIPADO: el stop se mueve al alcanzar beTriggerR (1.2R).
+// v7 — ZONAS ACTIVAS (solo visual).
+// v8 — NIVELES PROYECTADOS (solo visual) + blindaje riesgo<=0.
+// v9 — corrige la etiqueta de niveles para que siga el borde de la zona.
+// v10 — TP1 baja de 2R a 1.8R.
+// v11 — al llegar a 1.2R, asegura +0.5R de ganancia real en vez de solo BE.
+// v12 — añade:
+//    9) SEGUNDA ZONA (solo visual): además del OB puro, dibuja el rango
+//       ampliado que incluye el margen de 12 puntos — es el área real
+//       donde una vela puede disparar la entrada, no solo el borde exacto.
+//    10) ALERTAS: alertcondition() para zona nueva detectada y para toque/
+//       entrada real, así puedes recibir notificación sin vigilar el chart.
+//       (Las alertas reales se configuran desde el indicador gemelo
+//       "ICT 15M OB Alertas", porque TradingView no permite elegir
+//       alertcondition() en scripts de tipo strategy().)
+// ============================================================
+//
+// FINALIZADO — no modificar directamente. Cualquier ajuste o análisis nuevo
+// se hace en un script/indicador aparte (ver /pine/ICT_15M_OB_Alertas.pine
+// y /docs para el historial de decisiones).
+
+startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
+endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
+useSessionFilter = input.bool(true, "Aplicar filtro de sesión (18:00-11:00 NY)")
+dispLen        = input.int(20, "Avg-range lookback for displacement detection (15M bars)", minval=5, maxval=60)
+dispMult       = input.float(2.5, "Displacement threshold - candle range >= this x avg range", minval=1.2, maxval=6.0)
+dispCloseFrac  = input.float(0.6, "Min fraction of range the close must cover in the displacement direction", minval=0.3, maxval=1.0)
+obScanBars     = input.int(10, "Max bars back to find OB candle", minval=3, maxval=30)
+liqCheckBars   = input.int(12, "Lookback window to check for liquidity behind OB (15M bars)", minval=3, maxval=40)
+liqTolerancePts= input.float(4.0, "Tolerance to count a wick as 'testing' the same level", minval=0)
+liqAccumBars   = input.int(6, "Min CONSECUTIVE 15M bars dwelling at the level = real accumulation -> dirty (~1.5h at 6)", minval=2, maxval=20)
+slBufferPts    = input.float(2.0, "SL buffer beyond OB far edge (price units)", minval=0)
+entryBufferPts = input.float(12.0, "Entry trigger buffer past OB near edge (price units)", minval=0)
+rr1            = input.float(1.8, "TP1 R multiple (cierra 2 contratos)")
+rr2            = input.float(4.0, "TP2 R multiple (cierra el contrato restante)")
+useRiskCap     = input.bool(true, "Descartar señal si el stop supera el tope de riesgo")
+maxRiskPts     = input.float(100.0, "Tope máximo de riesgo por operación (puntos)", minval=10)
+beTriggerR     = input.float(1.2, "Activar protección al alcanzar este múltiplo de R (0 = desactivado)", minval=0, maxval=2)
+lockR          = input.float(0.5, "Ganancia a asegurar en ese punto (0 = breakeven puro, no debe superar beTriggerR)", minval=0, maxval=2)
+showZones      = input.bool(true, "Mostrar zona del OB puro (solo visual)")
+showWideZone   = input.bool(true, "Mostrar zona ampliada OB + margen de entrada (solo visual)")
+showLevels     = input.bool(true, "Mostrar SL/TP1/TP2 proyectados mientras la zona está activa (solo visual)")
+
+inDateRange = time >= startDate and time <= endDate
+
+nyHour   = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+nyMinOfDay = nyHour * 60 + nyMinute
+inSession = useSessionFilter ? (nyMinOfDay >= 1080 or nyMinOfDay < 660) : true   // 18:00-11:00 NY
+
+f_ob(scanBars, liqLen, liqTol, accumBars, avgLen, mult, closeFrac) =>
+    avgRange = ta.sma(high - low, avgLen)
+    rng = high - low
+    isDisp = rng >= mult * avgRange[1]
+    bullDisp = isDisp and close > open and (close - low) >= closeFrac * rng
+    bearDisp = isDisp and close < open and (high - close) >= closeFrac * rng
+
+    var float bullTop = na
+    var float bullBot = na
+    var bool  bullFresh = false
+    var bool  bullCleared = false
+    var int   bullObBar = na
+    var float bearTop = na
+    var float bearBot = na
+    var bool  bearFresh = false
+    var bool  bearCleared = false
+    var int   bearObBar = na
+
+    bullFormedNow = false
+    bearFormedNow = false
+
+    if bullDisp
+        idx = -1
+        for i = 1 to scanBars
+            if close[i] < open[i]
+                idx := i
+                break
+        if idx != -1
+            candBot = low[idx]
+            maxStreak = 0
+            curStreak = 0
+            for j = idx+1 to idx+liqLen
+                if low[j] <= candBot + liqTol
+                    curStreak += 1
+                    maxStreak := math.max(maxStreak, curStreak)
+                else
+                    curStreak := 0
+            if maxStreak < accumBars
+                bullTop := high[idx]
+                bullBot := candBot
+                bullFresh := true
+                bullCleared := false
+                bullFormedNow := true
+                bullObBar := bar_index - idx
+
+    if bearDisp
+        idx2 = -1
+        for i = 1 to scanBars
+            if close[i] > open[i]
+                idx2 := i
+                break
+        if idx2 != -1
+            candTop = high[idx2]
+            maxStreak2 = 0
+            curStreak2 = 0
+            for j = idx2+1 to idx2+liqLen
+                if high[j] >= candTop - liqTol
+                    curStreak2 += 1
+                    maxStreak2 := math.max(maxStreak2, curStreak2)
+                else
+                    curStreak2 := 0
+            if maxStreak2 < accumBars
+                bearTop := candTop
+                bearBot := low[idx2]
+                bearFresh := true
+                bearCleared := false
+                bearFormedNow := true
+                bearObBar := bar_index - idx2
+
+    if not bullFormedNow and bullFresh and not bullCleared and not na(bullTop) and low > bullTop
+        bullCleared := true
+    if not bearFormedNow and bearFresh and not bearCleared and not na(bearBot) and high < bearBot
+        bearCleared := true
+
+    bullTouchable = not bullFormedNow and bullCleared and bullFresh
+    bearTouchable = not bearFormedNow and bearCleared and bearFresh
+
+    if not bullFormedNow and bullCleared and bullFresh and not na(bullTop) and low <= bullTop
+        bullFresh := false
+    if not bearFormedNow and bearCleared and bearFresh and not na(bearBot) and high >= bearBot
+        bearFresh := false
+
+    [bullTop, bullBot, bullTouchable, bearTop, bearBot, bearTouchable, bullFormedNow, bearFormedNow, bullObBar, bearObBar]
+
+[bullTop, bullBot, bullFresh, bearTop, bearBot, bearFresh, bullFormedNow, bearFormedNow, bullObBar, bearObBar] =
+     request.security(syminfo.tickerid, "15", f_ob(obScanBars, liqCheckBars, liqTolerancePts, liqAccumBars, dispLen, dispMult, dispCloseFrac), lookahead=barmerge.lookahead_off)
+
+// ---- v7/v8/v9/v12: zonas activas + niveles proyectados (solo visual) ----
+var box   bullZoneBox     = na
+var box   bearZoneBox     = na
+var box   bullZoneBoxWide = na
+var box   bearZoneBoxWide = na
+var line  bullSLLine   = na
+var line  bullTP1Line  = na
+var line  bullTP2Line  = na
+var line  bearSLLine   = na
+var line  bearTP1Line  = na
+var line  bearTP2Line  = na
+var label bullInfoLabel = na
+var label bearInfoLabel = na
+
+projBullRisk = bullTop - (bullBot - slBufferPts)
+projBullSL   = bullBot - slBufferPts
+projBullTP1  = bullTop + projBullRisk * rr1
+projBullTP2  = bullTop + projBullRisk * rr2
+projBearRisk = (bearTop + slBufferPts) - bearBot
+projBearSL   = bearTop + slBufferPts
+projBearTP1  = bearBot - projBearRisk * rr1
+projBearTP2  = bearBot - projBearRisk * rr2
+
+if showZones
+    if bullFormedNow
+        box.delete(bullZoneBox)
+        bullZoneBox := box.new(left=bullObBar, top=bullTop, bottom=bullBot, right=bar_index,
+             border_color=color.new(color.green, 20), bgcolor=color.new(color.green, 85), border_width=2)
+    else if bullFresh and not na(bullZoneBox)
+        box.set_right(bullZoneBox, bar_index)
+    else if not bullFresh and not na(bullZoneBox)
+        box.delete(bullZoneBox)
+        bullZoneBox := na
+
+    if bearFormedNow
+        box.delete(bearZoneBox)
+        bearZoneBox := box.new(left=bearObBar, top=bearTop, bottom=bearBot, right=bar_index,
+             border_color=color.new(color.red, 20), bgcolor=color.new(color.red, 85), border_width=2)
+    else if bearFresh and not na(bearZoneBox)
+        box.set_right(bearZoneBox, bar_index)
+    else if not bearFresh and not na(bearZoneBox)
+        box.delete(bearZoneBox)
+        bearZoneBox := na
+
+if showWideZone
+    if bullFormedNow
+        box.delete(bullZoneBoxWide)
+        bullZoneBoxWide := box.new(left=bullObBar, top=bullTop+entryBufferPts, bottom=bullBot, right=bar_index,
+             border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 94), border_width=1, border_style=line.style_dashed)
+    else if bullFresh and not na(bullZoneBoxWide)
+        box.set_right(bullZoneBoxWide, bar_index)
+    else if not bullFresh and not na(bullZoneBoxWide)
+        box.delete(bullZoneBoxWide)
+        bullZoneBoxWide := na
+
+    if bearFormedNow
+        box.delete(bearZoneBoxWide)
+        bearZoneBoxWide := box.new(left=bearObBar, top=bearTop, bottom=bearBot-entryBufferPts, right=bar_index,
+             border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 94), border_width=1, border_style=line.style_dashed)
+    else if bearFresh and not na(bearZoneBoxWide)
+        box.set_right(bearZoneBoxWide, bar_index)
+    else if not bearFresh and not na(bearZoneBoxWide)
+        box.delete(bearZoneBoxWide)
+        bearZoneBoxWide := na
+
+if showLevels
+    if bullFormedNow
+        line.delete(bullSLLine)
+        line.delete(bullTP1Line)
+        line.delete(bullTP2Line)
+        label.delete(bullInfoLabel)
+        bullSLLine    := line.new(bullObBar, projBullSL,  bar_index, projBullSL,  color=color.new(color.red, 20),  style=line.style_dashed, width=1)
+        bullTP1Line   := line.new(bullObBar, projBullTP1, bar_index, projBullTP1, color=color.new(color.teal, 20), style=line.style_dashed, width=1)
+        bullTP2Line   := line.new(bullObBar, projBullTP2, bar_index, projBullTP2, color=color.new(color.lime, 20), style=line.style_dashed, width=1)
+        bullInfoLabel := label.new(bar_index, projBullTP2, "OB LONG activo\nSL " + str.tostring(projBullSL, "#.##") +
+          "  TP1 " + str.tostring(projBullTP1, "#.##") + "  TP2 " + str.tostring(projBullTP2, "#.##"),
+          style=label.style_label_down, color=color.new(color.green, 70), textcolor=color.white, size=size.small)
+    else if bullFresh and not na(bullSLLine)
+        line.set_x2(bullSLLine, bar_index)
+        line.set_x2(bullTP1Line, bar_index)
+        line.set_x2(bullTP2Line, bar_index)
+        label.set_x(bullInfoLabel, bar_index)
+        label.set_y(bullInfoLabel, projBullTP2)
+    else if not bullFresh and not na(bullSLLine)
+        line.delete(bullSLLine)
+        line.delete(bullTP1Line)
+        line.delete(bullTP2Line)
+        label.delete(bullInfoLabel)
+        bullSLLine := na
+        bullTP1Line := na
+        bullTP2Line := na
+        bullInfoLabel := na
+
+    if bearFormedNow
+        line.delete(bearSLLine)
+        line.delete(bearTP1Line)
+        line.delete(bearTP2Line)
+        label.delete(bearInfoLabel)
+        bearSLLine    := line.new(bearObBar, projBearSL,  bar_index, projBearSL,  color=color.new(color.red, 20),  style=line.style_dashed, width=1)
+        bearTP1Line   := line.new(bearObBar, projBearTP1, bar_index, projBearTP1, color=color.new(color.teal, 20), style=line.style_dashed, width=1)
+        bearTP2Line   := line.new(bearObBar, projBearTP2, bar_index, projBearTP2, color=color.new(color.lime, 20), style=line.style_dashed, width=1)
+        bearInfoLabel := label.new(bar_index, projBearTP2, "OB SHORT activo\nSL " + str.tostring(projBearSL, "#.##") +
+          "  TP1 " + str.tostring(projBearTP1, "#.##") + "  TP2 " + str.tostring(projBearTP2, "#.##"),
+          style=label.style_label_up, color=color.new(color.red, 70), textcolor=color.white, size=size.small)
+    else if bearFresh and not na(bearSLLine)
+        line.set_x2(bearSLLine, bar_index)
+        line.set_x2(bearTP1Line, bar_index)
+        line.set_x2(bearTP2Line, bar_index)
+        label.set_x(bearInfoLabel, bar_index)
+        label.set_y(bearInfoLabel, projBearTP2)
+    else if not bearFresh and not na(bearSLLine)
+        line.delete(bearSLLine)
+        line.delete(bearTP1Line)
+        line.delete(bearTP2Line)
+        label.delete(bearInfoLabel)
+        bearSLLine := na
+        bearTP1Line := na
+        bearTP2Line := na
+        bearInfoLabel := na
+
+longZoneTouch  = bullFresh and not na(bullTop) and low  <= bullTop + entryBufferPts and low  >= bullBot
+shortZoneTouch = bearFresh and not na(bearBot) and high >= bearBot - entryBufferPts and high <= bearTop
+
+var bool  tradeOpen  = false
+var int   dir        = 0
+var float entryPrice = na
+var float activeSL   = na
+var float origSL     = na
+var float riskPts    = na
+var bool  tp1Hit     = false
+var bool  beMoved    = false
+
+canEnter = inSession and inDateRange and not tradeOpen
+
+longRisk0  = canEnter and longZoneTouch  ? math.max(low, bullTop) - (bullBot - slBufferPts) : na
+shortRisk0 = canEnter and shortZoneTouch ? (bearTop + slBufferPts) - math.min(high, bearBot) : na
+longRejected  = canEnter and longZoneTouch  and (not na(longRisk0)) and (longRisk0 <= 0 or (useRiskCap and longRisk0 > maxRiskPts))
+shortRejected = canEnter and shortZoneTouch and (not na(shortRisk0)) and (shortRisk0 <= 0 or (useRiskCap and shortRisk0 > maxRiskPts))
+
+longSignal  = canEnter and longZoneTouch  and not longRejected
+shortSignal = canEnter and shortZoneTouch and not shortRejected
+
+if longSignal
+    entryPrice := math.max(low, bullTop)
+    origSL     := bullBot - slBufferPts
+    activeSL   := origSL
+    riskPts    := entryPrice - origSL
+    tp1Hit     := false
+    beMoved    := false
+    tradeOpen  := true
+    dir        := 1
+    label.new(bar_index, low, "LONG " + str.tostring(entryPrice, "#.##") +
+      "\nSL " + str.tostring(origSL, "#.##") +
+      "\nAsegura +" + str.tostring(lockR, "#.##") + "R @ " + str.tostring(entryPrice + riskPts*lockR, "#.##") +
+      "\nTP1 " + str.tostring(entryPrice + riskPts*rr1, "#.##") +
+      "\nTP2 " + str.tostring(entryPrice + riskPts*rr2, "#.##"),
+      style=label.style_label_up, color=color.green, textcolor=color.white, yloc=yloc.belowbar, size=size.small)
+
+if shortSignal
+    entryPrice := math.min(high, bearBot)
+    origSL     := bearTop + slBufferPts
+    activeSL   := origSL
+    riskPts    := origSL - entryPrice
+    tp1Hit     := false
+    beMoved    := false
+    tradeOpen  := true
+    dir        := -1
+    label.new(bar_index, high, "SHORT " + str.tostring(entryPrice, "#.##") +
+      "\nSL " + str.tostring(origSL, "#.##") +
+      "\nAsegura +" + str.tostring(lockR, "#.##") + "R @ " + str.tostring(entryPrice - riskPts*lockR, "#.##") +
+      "\nTP1 " + str.tostring(entryPrice - riskPts*rr1, "#.##") +
+      "\nTP2 " + str.tostring(entryPrice - riskPts*rr2, "#.##"),
+      style=label.style_label_down, color=color.red, textcolor=color.white, yloc=yloc.abovebar, size=size.small)
+
+if longRejected
+    label.new(bar_index, low, "◌ descartada: stop " + str.tostring(longRisk0, "#.#") + " pts > tope " + str.tostring(maxRiskPts, "#.#"), style=label.style_label_up, color=color.new(color.gray, 60), textcolor=color.white, size=size.tiny)
+if shortRejected
+    label.new(bar_index, high, "◌ descartada: stop " + str.tostring(shortRisk0, "#.#") + " pts > tope " + str.tostring(maxRiskPts, "#.#"), style=label.style_label_down, color=color.new(color.gray, 60), textcolor=color.white, size=size.tiny)
+
+if tradeOpen and dir == 1
+    tp1  = entryPrice + riskPts * rr1
+    tp2  = entryPrice + riskPts * rr2
+    hitSL  = low <= activeSL
+    hitTP1 = not tp1Hit and high >= tp1
+    hitTP2 = tp1Hit and high >= tp2
+    reachedR = (high - entryPrice) / riskPts
+    if hitSL
+        if beMoved and not tp1Hit
+            label.new(bar_index, low, "= Cerrado asegurando +" + str.tostring(lockR, "#.##") + "R", style=label.style_label_up, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+        else if tp1Hit
+            label.new(bar_index, low, "✓ TP1+BE (contrato final protegido)", style=label.style_label_up, color=color.new(color.yellow, 0), textcolor=color.black, size=size.normal)
+        else
+            label.new(bar_index, low, "✗ PÉRDIDA TOTAL (3 contratos)", style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+        tradeOpen := false
+    else if hitTP1
+        tp1Hit   := true
+        beMoved  := true
+        activeSL := math.max(activeSL, entryPrice)
+        label.new(bar_index, high, "✓ TP1 (2 contratos) — SL restante protegido", style=label.style_label_down, color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+    else if hitTP2
+        label.new(bar_index, high, "✓✓ TP1+TP2 (los 3 contratos en ganancia)", style=label.style_label_down, color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpen := false
+    else if beTriggerR > 0 and not beMoved and reachedR >= beTriggerR
+        beMoved  := true
+        activeSL := entryPrice + riskPts*lockR
+        label.new(bar_index, high, "→ Asegura +" + str.tostring(lockR, "#.##") + "R (" + str.tostring(beTriggerR, "#.##") + "R)", style=label.style_label_down, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+if tradeOpen and dir == -1
+    tp1  = entryPrice - riskPts * rr1
+    tp2  = entryPrice - riskPts * rr2
+    hitSL  = high >= activeSL
+    hitTP1 = not tp1Hit and low <= tp1
+    hitTP2 = tp1Hit and low <= tp2
+    reachedR = (entryPrice - low) / riskPts
+    if hitSL
+        if beMoved and not tp1Hit
+            label.new(bar_index, high, "= Cerrado asegurando +" + str.tostring(lockR, "#.##") + "R", style=label.style_label_down, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+        else if tp1Hit
+            label.new(bar_index, high, "✓ TP1+BE (contrato final protegido)", style=label.style_label_down, color=color.new(color.yellow, 0), textcolor=color.black, size=size.normal)
+        else
+            label.new(bar_index, high, "✗ PÉRDIDA TOTAL (3 contratos)", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+        tradeOpen := false
+    else if hitTP1
+        tp1Hit   := true
+        beMoved  := true
+        activeSL := math.min(activeSL, entryPrice)
+        label.new(bar_index, low, "✓ TP1 (2 contratos) — SL restante protegido", style=label.style_label_up, color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+    else if hitTP2
+        label.new(bar_index, low, "✓✓ TP1+TP2 (los 3 contratos en ganancia)", style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpen := false
+    else if beTriggerR > 0 and not beMoved and reachedR >= beTriggerR
+        beMoved  := true
+        activeSL := entryPrice - riskPts*lockR
+        label.new(bar_index, low, "→ Asegura +" + str.tostring(lockR, "#.##") + "R (" + str.tostring(beTriggerR, "#.##") + "R)", style=label.style_label_up, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+bgcolor(inSession and inDateRange ? color.new(color.blue, 92) : na)

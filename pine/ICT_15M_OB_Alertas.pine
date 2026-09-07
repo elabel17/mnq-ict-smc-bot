@@ -1,0 +1,131 @@
+//@version=6
+indicator("ICT 15M OB Alertas", overlay=true)
+
+// Gemelo de "ICT 15M OB Entry v12 - alertas + doble zona", solo para alertas.
+// TradingView no permite elegir alertcondition() en scripts de tipo strategy(),
+// por eso este indicador replica la misma detección solo para exponer alertas.
+// FINALIZADO — no modificar directamente.
+
+startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
+endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
+useSessionFilter = input.bool(true, "Aplicar filtro de sesión (18:00-11:00 NY)")
+dispLen        = input.int(20, "Avg-range lookback", minval=5, maxval=60)
+dispMult       = input.float(2.5, "Displacement threshold", minval=1.2, maxval=6.0)
+dispCloseFrac  = input.float(0.6, "Min close fraction", minval=0.3, maxval=1.0)
+obScanBars     = input.int(10, "Max bars back to find OB candle", minval=3, maxval=30)
+liqCheckBars   = input.int(12, "Liquidity lookback", minval=3, maxval=40)
+liqTolerancePts= input.float(4.0, "Liquidity tolerance", minval=0)
+liqAccumBars   = input.int(6, "Min consecutive bars = dirty", minval=2, maxval=20)
+slBufferPts    = input.float(2.0, "SL buffer", minval=0)
+entryBufferPts = input.float(12.0, "Entry trigger buffer", minval=0)
+useRiskCap     = input.bool(true, "Descartar señal si el stop supera el tope")
+maxRiskPts     = input.float(100.0, "Tope máximo de riesgo (puntos)", minval=10)
+
+inDateRange = time >= startDate and time <= endDate
+nyHour   = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+nyMinOfDay = nyHour * 60 + nyMinute
+inSession = useSessionFilter ? (nyMinOfDay >= 1080 or nyMinOfDay < 660) : true
+
+f_ob(scanBars, liqLen, liqTol, accumBars, avgLen, mult, closeFrac) =>
+    avgRange = ta.sma(high - low, avgLen)
+    rng = high - low
+    isDisp = rng >= mult * avgRange[1]
+    bullDisp = isDisp and close > open and (close - low) >= closeFrac * rng
+    bearDisp = isDisp and close < open and (high - close) >= closeFrac * rng
+
+    var float bullTop = na
+    var float bullBot = na
+    var bool  bullFresh = false
+    var bool  bullCleared = false
+    var float bearTop = na
+    var float bearBot = na
+    var bool  bearFresh = false
+    var bool  bearCleared = false
+
+    bullFormedNow = false
+    bearFormedNow = false
+
+    if bullDisp
+        idx = -1
+        for i = 1 to scanBars
+            if close[i] < open[i]
+                idx := i
+                break
+        if idx != -1
+            candBot = low[idx]
+            maxStreak = 0
+            curStreak = 0
+            for j = idx+1 to idx+liqLen
+                if low[j] <= candBot + liqTol
+                    curStreak += 1
+                    maxStreak := math.max(maxStreak, curStreak)
+                else
+                    curStreak := 0
+            if maxStreak < accumBars
+                bullTop := high[idx]
+                bullBot := candBot
+                bullFresh := true
+                bullCleared := false
+                bullFormedNow := true
+
+    if bearDisp
+        idx2 = -1
+        for i = 1 to scanBars
+            if close[i] > open[i]
+                idx2 := i
+                break
+        if idx2 != -1
+            candTop = high[idx2]
+            maxStreak2 = 0
+            curStreak2 = 0
+            for j = idx2+1 to idx2+liqLen
+                if high[j] >= candTop - liqTol
+                    curStreak2 += 1
+                    maxStreak2 := math.max(maxStreak2, curStreak2)
+                else
+                    curStreak2 := 0
+            if maxStreak2 < accumBars
+                bearTop := candTop
+                bearBot := low[idx2]
+                bearFresh := true
+                bearCleared := false
+                bearFormedNow := true
+
+    if not bullFormedNow and bullFresh and not bullCleared and not na(bullTop) and low > bullTop
+        bullCleared := true
+    if not bearFormedNow and bearFresh and not bearCleared and not na(bearBot) and high < bearBot
+        bearCleared := true
+
+    bullTouchable = not bullFormedNow and bullCleared and bullFresh
+    bearTouchable = not bearFormedNow and bearCleared and bearFresh
+
+    if not bullFormedNow and bullCleared and bullFresh and not na(bullTop) and low <= bullTop
+        bullFresh := false
+    if not bearFormedNow and bearCleared and bearFresh and not na(bearBot) and high >= bearBot
+        bearFresh := false
+
+    [bullTop, bullBot, bullTouchable, bearTop, bearBot, bearTouchable, bullFormedNow, bearFormedNow]
+
+[bullTop, bullBot, bullFresh, bearTop, bearBot, bearFresh, bullFormedNow, bearFormedNow] =
+     request.security(syminfo.tickerid, "15", f_ob(obScanBars, liqCheckBars, liqTolerancePts, liqAccumBars, dispLen, dispMult, dispCloseFrac), lookahead=barmerge.lookahead_off)
+
+longZoneTouch  = bullFresh and not na(bullTop) and low  <= bullTop + entryBufferPts and low  >= bullBot
+shortZoneTouch = bearFresh and not na(bearBot) and high >= bearBot - entryBufferPts and high <= bearTop
+
+canCheck = inSession and inDateRange
+
+longRisk0  = canCheck and longZoneTouch  ? math.max(low, bullTop) - (bullBot - slBufferPts) : na
+shortRisk0 = canCheck and shortZoneTouch ? (bearTop + slBufferPts) - math.min(high, bearBot) : na
+longOk  = canCheck and longZoneTouch  and (not na(longRisk0))  and longRisk0  > 0 and (not useRiskCap or longRisk0  <= maxRiskPts)
+shortOk = canCheck and shortZoneTouch and (not na(shortRisk0)) and shortRisk0 > 0 and (not useRiskCap or shortRisk0 <= maxRiskPts)
+
+plotshape(bullFormedNow, title="Nueva zona LONG", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.tiny)
+plotshape(bearFormedNow, title="Nueva zona SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
+plotshape(longOk, title="Entrada LONG", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.small)
+plotshape(shortOk, title="Entrada SHORT", style=shape.circle, location=location.abovebar, color=color.new(color.maroon, 0), size=size.small)
+
+alertcondition(bullFormedNow, title="Nueva zona LONG detectada", message="{{ticker}}: nueva zona de COMPRA formada — revisa el chart y coloca tu limite")
+alertcondition(bearFormedNow, title="Nueva zona SHORT detectada", message="{{ticker}}: nueva zona de VENTA formada — revisa el chart y coloca tu limite")
+alertcondition(longOk, title="Entrada LONG (toque de zona)", message="{{ticker}}: precio toco zona de COMPRA — entrada activada")
+alertcondition(shortOk, title="Entrada SHORT (toque de zona)", message="{{ticker}}: precio toco zona de VENTA — entrada activada")
