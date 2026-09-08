@@ -212,7 +212,14 @@ def run_backtest(bars, cooldown_bars=0, lock_r=LOCK_R, verbose_trades=False):
                 if (i - z.born) > ZONE_MAX_AGE:
                     continue
                 if z.dir == 1 and l <= z.top + ENTRY_BUFFER_PTS and l >= z.bot:
-                    e = max(l, z.top)
+                    # FIX: precio de entrada causal, sin mirar el futuro de la vela.
+                    # Si alcanzo el OB puro (z.top, nivel fijo conocido de antemano)
+                    # -> entra ahi. Si solo toco el margen -> entra en el borde
+                    # EXTERIOR del margen (z.top+buffer), que es el primer nivel
+                    # que el precio cruza viniendo de afuera, no en "donde termino
+                    # llegando" esa vela (eso requeriria conocer el minimo final
+                    # de la vela antes de que termine de formarse).
+                    e = z.top if l <= z.top else z.top + ENTRY_BUFFER_PTS
                     x = z.bot - SL_BUFFER_PTS
                     r = e - x
                     if r > 0 and (not USE_RISK_CAP or r <= MAX_RISK_PTS):
@@ -220,7 +227,7 @@ def run_backtest(bars, cooldown_bars=0, lock_r=LOCK_R, verbose_trades=False):
                             cand_entry, cand_sl, cand_risk = e, x, r
                             cand_dir, cand_born = 1, z.born
                 if z.dir == -1 and h >= z.bot - ENTRY_BUFFER_PTS and h <= z.top:
-                    e2 = min(h, z.bot)
+                    e2 = z.bot if h >= z.bot else z.bot - ENTRY_BUFFER_PTS
                     x2 = z.top + SL_BUFFER_PTS
                     r2 = x2 - e2
                     if r2 > 0 and (not USE_RISK_CAP or r2 <= MAX_RISK_PTS):

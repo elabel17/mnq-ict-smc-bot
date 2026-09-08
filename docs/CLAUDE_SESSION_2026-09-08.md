@@ -1,6 +1,21 @@
 # Análisis crítico — Estrategia ICT 15M OB Entry
 
-Última actualización: 2026-09-07
+Última actualización: 2026-09-08 (noche) — fix causal aplicado al script real
+
+## 📌 RESUMEN PARA SESIÓN NUEVA / OTRA PC (leer esto primero)
+
+- **Script real vigente:** `pine/ICT_15M_OB_Entry_v15.pine` en el repo GitHub `elabel17/mnq-ict-smc-bot` = copia exacta del script en la cuenta de TradingView del usuario (`ICT 15M OB Entry v15 - multi-zona`, id `USER;8f652c4b1fd5403b918416fd4587f7e2`), ya con el fix de entrada causal aplicado y verificado el 2026-09-08.
+- **Número de referencia oficial actual:** $105.254,82 netos, 1.459 trades, PF 1,649, winrate 56,1%, max DD $3.872,06, sobre 6,27 años (2020-05-31 a 2026-09-08), MNQ 15m, 3 contratos, lockR 0,8R. Ver sección "✅ FIX CAUSAL APLICADO AL SCRIPT REAL" al final de este documento para el detalle completo.
+- **Cualquier cifra anterior (152k, 214k, 168k) está obsoleta** — todas corresponden a versiones del motor con al menos un sesgo de look-ahead ya corregido. No las uses para decisiones.
+- **Motor Python de referencia:** `data/engine/python/claude_engine.py` en el repo (= `Downloads/mnq_dataset/engine.py` local), ya sincronizado con el fix causal.
+- **Pendiente sin resolver (para retomar):**
+  1. El grid search de TP1/TP2 documentado en este archivo usó el motor CON el sesgo (antes del fix causal) — hay que re-correrlo con el motor actualizado antes de sacar conclusiones sobre si 1,8R/4R siguen siendo óptimos.
+  2. Discrepancia sin reconciliar: el grid de TP1 de este motor sube casi monótono hasta ~3,2R, contradiciendo el "1,8R óptimo" documentado en `docs/DECISIONS.md` del motor de referencia JS de la otra sesión — falta comparar ambos motores línea a línea en ese punto específico.
+  3. Automatización vía NinjaTrader: `ICT_OB_Strategy.cs` es un primer borrador SIN TESTEAR, pendiente de validar en Sim antes de confiar en él.
+  4. VPS y confirmación con Lucid Trading sobre permisos de trading algorítmico: quedan a cargo del usuario, no verificables por mí.
+- **Lección de proceso importante:** cualquier fix al backtest debe cuestionarse por causalidad — ¿el precio/nivel usado se conocía ANTES de que ocurriera, o requiere conocer el resto de una vela que aún no había cerrado? Ese fue el origen de los dos bugs más grandes encontrados en esta sesión (ver "beneficio de la duda en la vela de entrada" y "sesgo de mínimo de la vela" más abajo).
+
+---
 
 ## Contexto del usuario
 
@@ -435,6 +450,112 @@ Se reconstruyó un dataset independiente de **185.066 velas de 5 minutos** (2024
 
 **5 meses negativos de 33 (~15%)**: 2024-08 (-$1.073), 2025-06 (-$120), 2025-11 (-$577), 2026-04 (-$1.262), 2026-05 (-$379).
 
+## ✅ TEST: Entrada por confirmación + grid search TP1/TP2 (2026-09-08)
+
+**Pregunta del usuario:** ¿condicionar la entrada (esperar a ver si el precio llega al OB puro antes de aceptar el toque en el margen de 12pts) mejora el resultado? ¿Por qué TP1=1,8R? ¿Reducir TP2 sería más rentable dado que TP1 cierra más contratos?
+
+### Entrada por confirmación — probada, resultado NEGATIVO
+
+Implementada como estado por zona: al tocar solo el margen de 12pts (sin alcanzar el OB puro), la zona queda "armada" esperando; se resuelve entrando en el borde real si lo alcanza, o en el borde del margen si el precio se revierte limpio hacia afuera; si no pasa ninguna, la zona muere sin operar.
+
+| | Confirmación | Original (toque inmediato) |
+|---|---|---|
+| Trades | 1.441 | 1.543 |
+| Net profit | $144.226 | **$152.338** |
+| PF | 2,10 | 2,13 |
+| Winrate | 59,3% | 62,3% |
+| Max DD | $3.337 | $3.171 |
+
+**-5,3% peor en todas las métricas. No se recomienda implementar.** Las zonas que caducan esperando confirmación (sin tocar el OB puro ni revertir limpio) cuestan más operaciones de las que se ganan en mejor precio.
+
+⚠️ Nota de proceso: la primera implementación tenía un bug (zona "armada" nunca se removía de la lista → 23.206 trades, PF 1.3, claramente roto). Corregido marcando la zona `resolved` en el mismo bar que produce la entrada.
+
+### Grid TP1 (rr2 fijo en 4.0) — CONTRADICE lo documentado en DECISIONS.md
+
+| TP1 | Net profit | PF |
+|---|---|---|
+| 1,2R | $135.663 | 2,01 |
+| 1,4R | $143.707 | 2,07 |
+| 1,6R | $149.089 | 2,11 |
+| **1,8R (actual)** | **$152.338** | **2,13** |
+| 2,0R | $156.655 | 2,17 |
+| 2,4R | $162.505 | 2,21 |
+| 3,0R | $166.166 | 2,24 |
+| 3,8R | $167.888 | 2,25 (mejor de todo el grid) |
+
+**Sube de forma casi monótona con TP1 más alto**, sin el pico en 1,8R que documenta `DECISIONS.md` (*"1.8R es el punto más rentable en $ y win rate combinados"*). Winrate se mantiene plano (~62,3%) en todo el rango porque depende del BE-trigger fijo (1,2R), no de TP1.
+
+**Discrepancia sin resolver:** no se pudo determinar si la diferencia es por modelo de ejecución, rango de fechas, o criterio de optimización distinto (quizás la otra sesión pesó consistencia/drawdown, no solo ganancia bruta). Pendiente de reconciliar con el motor de referencia (JS) de la otra sesión antes de tocar el parámetro real.
+
+## 🔴 CORRECCIÓN MAYOR (2026-09-08, noche) — sesgo de "mínimo de la vela" en la entrada base — encontrado por el usuario
+
+**El usuario cuestionó, con lógica pura, por qué el precio de entrada usaba "donde llegó esa vela" en vez de un precio conocido de antemano** — señaló correctamente que usar el mínimo/máximo real de una vela de 15m como precio de entrada requiere, en la práctica, conocer ese mínimo antes de que la vela termine de formarse (esperar a verla completa) — información que un trader/orden real no tendría en el instante del primer contacto.
+
+**Confirmado como un sesgo real, no solo una duda:** la fórmula original `entrada = max(mínimo_de_la_vela, borde_del_OB)` es causalmente válida SOLO cuando el precio alcanza el borde puro del OB (nivel fijo, conocido de antemano). Pero cuando el precio solo toca el margen de 12 puntos sin llegar al borde puro, usar el mínimo real de la vela es mirar "hacia el futuro" de esa misma vela — el 71,2% de las entradas históricas eran de este tipo (medido empíricamente, ver distribución abajo).
+
+**Fix aplicado:** para toques de "solo margen", la entrada ahora usa el borde EXTERIOR del margen (`z.top + entryBufferPts`), un precio fijo conocido antes de que ocurra el toque — no el mínimo real de esa vela.
+
+### Impacto en el histórico completo (6,27 años, 3 contratos, lockR=0,8R)
+
+| | Antes (con el sesgo) | **Corregido (causal)** |
+|---|---|---|
+| Trades | 1.543 | 1.459 |
+| Net profit | $152.338 | **$105.255** |
+| Profit Factor | 2,13 | **1,65** |
+| Winrate | 62,3% | **56,1%** |
+| Max drawdown | $3.171 | $3.872 |
+
+**-31% de ganancia neta.** Este es ahora **el número más confiable obtenido hasta la fecha** — corrige un sesgo de "ver el futuro" que afectaba a la mayoría de las operaciones (71,2%), no un caso marginal.
+
+### Distribución empírica que reveló el problema
+
+Medido en el histórico ANTES del fix (3.610 señales de entrada, muestreo simplificado):
+
+| Punto de entrada dentro del margen | % de las señales |
+|---|---|
+| Exacto en el OB puro (0%) | 28,8% |
+| 0-25% del margen | 16,0% |
+| 25-50% del margen | 16,8% |
+| 50-75% del margen | 19,8% |
+| 75-100% del margen | 18,6% |
+
+Promedio: 37,8% de profundidad en el margen — es decir, la mayoría de las entradas NO llegaban al borde puro, y por tanto SÍ estaban afectadas por el sesgo.
+
+**⚠️ PENDIENTE:** este mismo fix debe aplicarse también al script real en TradingView (v15) y a los archivos ya subidos a GitHub (`claude_engine.py`, `claude_ohlcv_*`), que reflejan la versión con el sesgo todavía. Los grid search de TP1/TP2 y el test de entrada por confirmación de esta sesión también quedan desactualizados y deberían re-ejecutarse con el motor corregido antes de tomarlos como definitivos.
+
+### Corrección del test de confirmación — resuelto con sub-velas de 5m
+
+El usuario aclaró la mecánica exacta: entrada pendiente en el borde del margen (112 en el ejemplo), mejora a mejor precio si el OB puro (100) se toca primero, y se llena en 112 si el precio se revierte antes. El primer test (arriba) usaba velas de 15m completas para resolver esto, lo cual el usuario señaló correctamente como insuficiente: **dentro de una sola vela de 15m el precio puede tocar ambas zonas y revertir, sin que el motor pueda saber el orden real.**
+
+Advertencia epistémica importante, válida para TODO backtest basado en velas (no solo esta prueba): un toque simple (¿llegó el precio a X?) es un hecho verificable en cualquier resolución. Pero la SECUENCIA de eventos (¿qué pasó primero?) solo se aproxima mejor con velas más chicas, nunca se resuelve del todo sin datos tick reales. La estrategia en sí (una orden límite real) no tiene este problema en ejecución real — el problema es exclusivo de intentar reconstruirla en un backtest histórico con datos de velas.
+
+**Repetido con sub-velas de 5 minutos** (mismo dataset de 185.066 velas, 2024-2026, resolviendo la espera/confirmación con las 3 sub-velas de cada período de 15m en orden cronológico real):
+
+| | Confirmación (sub-velas 5m) | Original (mismo rango) |
+|---|---|---|
+| Trades | 561 | 593 |
+| Net profit | $41.221 | **$62.419** |
+| PF | 1,64 | 2,08 |
+| Winrate | 56,1% | 60,9% |
+
+**-34% de ganancia — la diferencia se agranda (no se achica) con más precisión respecto al -5,3% medido a 15m puro.** Esto sugiere que la medición a 15m subestimaba lo desfavorable del enfoque. Causa de fondo (confirmada en ambas resoluciones): entrar en el borde del margen (112) en vez del punto de toque real añade riesgo, lo que descarta más operaciones por el tope de 100 puntos.
+
+**Conclusión: no se recomienda implementar, con evidencia consistente en dos niveles de granularidad.** No se recomienda seguir refinando con más resolución (1m) dado que la señal ya es clara y consistente en dirección.
+
+### Grid TP2 (rr1 fijo en 1,8, el actual) — responde la pregunta del usuario
+
+| TP2 | Net profit | PF |
+|---|---|---|
+| 2,0R | $140.225 | 2,01 |
+| 3,0R | $148.679 | 2,08 |
+| 3,5R | $150.621 | 2,11 |
+| **4,0R (actual)** | **$152.338** | **2,13** |
+| 4,5R | $149.012 | 2,12 |
+| 5,0R | $150.476 | 2,14 |
+| 6,0R | $146.912 | 2,14 |
+
+**Reducir TP2 por debajo de 4R empeora el resultado en todos los valores probados — la hipótesis del usuario ("acortar TP2 sería más rentable porque TP1 cierra más contratos") queda descartada por los datos.** El valor actual (4R) está muy cerca del óptimo del grid.
+
 ## Dataset histórico reconstruido (para reuso futuro)
 
 Guardado en `C:\Users\ABEL~1.DIA\AppData\Local\Temp\claude\...\scratchpad\merged_ohlcv.json` (temporal, se pierde al cerrar sesión) — **pendiente moverlo a ubicación permanente si se quiere reusar** sin repetir la extracción de ~16 ventanas vía `ui_evaluate`. 147.749 velas de 15m, MNQ1!, mayo 2020 – sep 2026, un solo hueco de 4 días sin rellenar (26-30 mar 2026, irrelevante para el agregado).
@@ -504,3 +625,37 @@ El usuario pidió: análisis de entradas, beneficio, comisiones por trade, e inf
 2. ¿El TF del chart al correr ese backtest era 15m fijo, o cambiaba?
 3. ¿Los 3 contratos se reparten 1/1/1, 2/1, u otra combinación entre TP1/TP2/runner? (pregunta ya hecha, aún sin respuesta explícita)
 4. ¿Los parámetros actuales (dispMult 2.5, entryBufferPts 12, etc.) fueron fijados de antemano o ajustados mirando resultados pasados?
+
+## ✅ FIX CAUSAL APLICADO AL SCRIPT REAL (2026-09-08, noche)
+
+El sesgo de "mínimo de la vela" descrito arriba (sección "🔴 CORRECCIÓN MAYOR") ya estaba corregido en el motor Python (`engine.py`), pero **hasta ahora seguía presente en el script real de TradingView** (`ICT 15M OB Entry v15 - multi-zona`, `USER;8f652c4b1fd5403b918416fd4587f7e2`) — es decir, el script que efectivamente genera las alertas y señales que el usuario opera. Esto quedó resuelto:
+
+**Cambio aplicado (Pine v6, sección "4) Buscar candidata de entrada"):**
+- Antes: `e = math.max(low, z.top)` / `e2 = math.min(high, z.bot)` — usaba el mínimo/máximo REAL alcanzado por la vela, que no se conoce hasta que la vela termina de formarse.
+- Ahora: `e = low <= z.top ? z.top : z.top + entryBufferPts` / `e2 = high >= z.bot ? z.bot : z.bot - entryBufferPts` — usa únicamente niveles fijos conocidos de antemano (el borde puro del OB, o el borde exterior del margen de 12pts).
+
+**Proceso de verificación (siguiendo la lección aprendida el mismo día con el label de aviso que no persistió a la primera):**
+1. `pine_set_source` con el código corregido (436 líneas).
+2. `pine_smart_compile` → compiló sin errores.
+3. `pine_get_source` inmediatamente después → **confirmado que el cambio persistió** en el servidor antes de tocar el chart.
+4. Se quitó la instancia vieja del indicador del chart y se volvió a agregar (`chart_manage_indicator` remove + `indicator_add`), para que la instancia visible cargue el código nuevo.
+5. Verificado visualmente con screenshot: el script corre, dibuja zonas OB, niveles SL/TP1/TP2 y caja de "asegura +0.8R" correctamente, sin el aviso de timeframe (que también seguía quitado).
+
+**A partir de ahora, el número de referencia oficial de la estrategia es el del histórico completo con el fix causal aplicado:**
+
+| | Valor |
+|---|---|
+| Período | 2020-05-31 a 2026-09-08 (6,27 años) |
+| Trades | 1.459 |
+| Net profit | **$105.254,82** |
+| Profit Factor | 1,649 |
+| Winrate | 56,1% |
+| Max drawdown | $3.872,06 |
+| Meses negativos | 14 de 76 |
+
+Los resultados de $152.338 (o superiores) mencionados en secciones anteriores de este documento **quedan obsoletos** — corresponden a la versión con el sesgo de hindsight, ya no reflejan lo que el script real hace desde este cambio.
+
+**Pendiente de esta corrección:**
+- Re-ejecutar el grid search de TP1/TP2 con el motor causal (los grids documentados arriba usaban el motor con el sesgo).
+- Reconciliar la discrepancia del grid de TP1 (sube monótono hasta ~3,2R en mi motor vs. "1,8R óptimo" documentado por la otra sesión) contra el motor de referencia JS, ahora que el motor Python está en su versión más confiable.
+- Push a GitHub (`elabel17/mnq-ict-smc-bot`) de: `engine.py` corregido, este documento actualizado, y una nota indicando que el commit anterior (`9d8f0b6`) refleja la versión pre-fix.

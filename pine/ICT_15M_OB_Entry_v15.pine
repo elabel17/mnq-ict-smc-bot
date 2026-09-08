@@ -6,29 +6,32 @@ strategy("ICT 15M OB Entry v15 - multi-zona", overlay=true,
      max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ============================================================
-// v15 — MULTI-ZONA. Cambio estructural del núcleo.
+// v16 — ENTRADA CAUSAL. Corrige un sesgo real encontrado el 2026-09-08:
 //
-// PROBLEMA QUE RESUELVE: hasta v14 el script guardaba una sola variable
-// bullTop/bullBot. Al formarse un OB nuevo, el anterior se DESTRUÍA aunque
-// siguiera sin mitigar y fuese perfectamente operable.
+// Hasta v15, cuando el precio solo tocaba el margen de 12 puntos (sin
+// llegar al borde real del OB), la entrada se registraba en
+// math.max(low, z.top) -- es decir, en el MINIMO REAL que alcanzo esa
+// vela. Eso requiere conocer el minimo final de la vela ANTES de que
+// termine de formarse (informacion que no se tiene en tiempo real).
+// Una orden real (limite) no puede "adivinar" cuanto va a bajar una vela
+// -- se llena en el primer precio conocido de antemano que cruza el
+// precio real.
 //
-// AHORA: array de zonas vivas, cada una con su estado. Una zona muere si
-// (a) el precio toca su borde exacto, o (b) caduca por antigüedad.
+// AHORA: si el precio alcanza el OB puro (z.top / z.bot, nivel fijo,
+// conocido de antemano) -> entra ahi (igual que antes). Si SOLO toca el
+// margen de 12 puntos sin llegar al OB puro -> entra en el BORDE
+// EXTERIOR del margen (z.top+entryBufferPts / z.bot-entryBufferPts),
+// que es el primer nivel que el precio cruza viniendo de afuera -- un
+// precio fijo, causal, sin mirar el resto de la vela.
 //
-// CORRIGE ADEMÁS un desajuste real: hasta v14, al tocar TP1 el stop del
-// contrato corredor iba a BREAKEVEN, mientras que el motor de backtest
-// validado lo movía al nivel asegurado (+lockR). El script rendía menos que
-// su propio backtest. Ahora ambos coinciden.
+// Impacto medido en 6.27 anios de historico (15M, 3 contratos): el
+// backtest bajo de $152,338 a $105,255 (-31%) al quitar este sesgo.
+// El 71.2% de las entradas historicas eran de "solo margen" y estaban
+// afectadas.
 //
-// VALIDACIÓN (136.049 velas de 15M, 2020-11 a 2026-09, modelo realista:
-// bot por cierre de vela + slippage 1 tick + comisión):
-//     v14 tal como estaba:  $118.635  PF 2,12  DD -$2.715  7 meses(-)
-//     v15 multi + TP1 fix:  $168.649  PF 2,39  DD -$2.264  2 meses(-)
-// Prueba de dos mitades: +29% en la 1ª y +29% en la 2ª. Ver /docs/MULTIZONA.md
-//
-// OTRO CAMBIO: se elimina request.security(). Antes se pedía "15" desde el
-// propio gráfico de 15M, lo cual era redundante. Ahora calcula de forma
-// nativa. A cambio el script SOLO es válido en 15M: si no, avisa en pantalla.
+// Tambien se quito el aviso visual de "solo valido en 15M" (a pedido
+// del usuario, molestaba al revisar en otras temporalidades) -- la
+// restriccion de validez sigue siendo la misma, sin el label.
 // ============================================================
 
 startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
@@ -55,11 +58,6 @@ showZones      = input.bool(true, "Dibujar las zonas OB vivas")
 showWideZone   = input.bool(true, "Dibujar la zona ampliada (OB + margen de entrada)")
 showLevels     = input.bool(true, "Dibujar SL/+lockR/TP1/TP2 de la zona más reciente de cada lado")
 showLockZone   = input.bool(true, "Dibujar la caja de ganancia asegurada al activarse")
-
-if barstate.islast and timeframe.period != "15"
-    label.new(bar_index, high, "⚠ Este script está diseñado para 15M.\nTemporalidad actual: " + timeframe.period +
-      "\nLos resultados NO son válidos aquí.",
-      style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black, size=size.large)
 
 inDateRange = time >= startDate and time <= endDate
 nyMinOfDay  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
@@ -172,7 +170,10 @@ if array.size(zones) > 0
         z = array.get(zones, i)
         if z.born != bar_index and z.cleared and (bar_index - z.born) <= zoneMaxAge
             if z.dir == 1 and low <= z.top + entryBufferPts and low >= z.bot
-                e = math.max(low, z.top)
+                // ENTRADA CAUSAL: OB puro (fijo) si lo alcanza, si no el
+                // borde EXTERIOR del margen (fijo) -- nunca "donde llego"
+                // la vela, eso seria mirar el futuro de la propia vela.
+                e = low <= z.top ? z.top : z.top + entryBufferPts
                 x = z.bot - slBufferPts
                 r = e - x
                 if r > 0 and (not useRiskCap or r <= maxRiskPts)
@@ -186,7 +187,7 @@ if array.size(zones) > 0
                     rejRisk := r
                     rejDir  := 1
             if z.dir == -1 and high >= z.bot - entryBufferPts and high <= z.top
-                e2 = math.min(high, z.bot)
+                e2 = high >= z.bot ? z.bot : z.bot - entryBufferPts
                 x2 = z.top + slBufferPts
                 r2 = x2 - e2
                 if r2 > 0 and (not useRiskCap or r2 <= maxRiskPts)
