@@ -1,8 +1,9 @@
 //@version=6
-strategy("ICT 15M OB Entry v13 - lock 0.8R", overlay=true,
+strategy("ICT 15M OB Entry v14 - zona +0.8R visible", overlay=true,
      initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
      calc_on_every_tick=false, process_orders_on_close=true,
-     commission_type=strategy.commission.cash_per_contract, commission_value=0.0)
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ============================================================
 // v6 — BREAKEVEN ANTICIPADO: el stop se mueve al alcanzar beTriggerR (1.2R).
@@ -30,6 +31,12 @@ strategy("ICT 15M OB Entry v13 - lock 0.8R", overlay=true,
 //       Se descartó 1.2R: es un artefacto (el stop quedaría a 0 puntos del
 //       disparador); su ventaja se desploma -19,9% al modelar ejecución por
 //       cierre de vela. Ver /data/engine y /docs/ANALYSIS_LOG.md.
+// v14 — VISUAL: se dibuja el nivel de ganancia asegurada (+lockR).
+//       a) como línea proyectada junto a SL/TP1/TP2 desde que nace la zona,
+//       b) como caja sombreada entre la entrada y el nivel asegurado, que
+//          aparece en el instante en que la protección se activa y queda
+//          dibujada en el histórico para poder revisarla después.
+//       Sin cambios en la lógica de operación: es puramente visual.
 // ============================================================
 
 startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
@@ -53,6 +60,8 @@ lockR          = input.float(0.8, "Ganancia a asegurar en ese punto (0 = breakev
 showZones      = input.bool(true, "Mostrar zona del OB puro (solo visual)")
 showWideZone   = input.bool(true, "Mostrar zona ampliada OB + margen de entrada (solo visual)")
 showLevels     = input.bool(true, "Mostrar SL/TP1/TP2 proyectados mientras la zona está activa (solo visual)")
+showLockLevel  = input.bool(true, "Mostrar el nivel de ganancia asegurada (+lockR) proyectado (solo visual)")
+showLockZone   = input.bool(true, "Mostrar la caja de ganancia asegurada al activarse la protección (solo visual)")
 
 inDateRange = time >= startDate and time <= endDate
 
@@ -159,8 +168,13 @@ var line  bullTP2Line  = na
 var line  bearSLLine   = na
 var line  bearTP1Line  = na
 var line  bearTP2Line  = na
+var line  bullLockLine = na
+var line  bearLockLine = na
 var label bullInfoLabel = na
 var label bearInfoLabel = na
+// v14: caja de ganancia asegurada durante la operación. No se borra al cerrar:
+// se suelta la referencia para que quede dibujada en el histórico.
+var box   lockZoneBox   = na
 
 projBullRisk = bullTop - (bullBot - slBufferPts)
 projBullSL   = bullBot - slBufferPts
@@ -170,6 +184,9 @@ projBearRisk = (bearTop + slBufferPts) - bearBot
 projBearSL   = bearTop + slBufferPts
 projBearTP1  = bearBot - projBearRisk * rr1
 projBearTP2  = bearBot - projBearRisk * rr2
+// v14: nivel de ganancia asegurada proyectado (donde quedará el stop al llegar a beTriggerR)
+projBullLock = bullTop + projBullRisk * lockR
+projBearLock = bearBot - projBearRisk * lockR
 
 if showZones
     if bullFormedNow
@@ -222,23 +239,30 @@ if showLevels
         bullSLLine    := line.new(bullObBar, projBullSL,  bar_index, projBullSL,  color=color.new(color.red, 20),  style=line.style_dashed, width=1)
         bullTP1Line   := line.new(bullObBar, projBullTP1, bar_index, projBullTP1, color=color.new(color.teal, 20), style=line.style_dashed, width=1)
         bullTP2Line   := line.new(bullObBar, projBullTP2, bar_index, projBullTP2, color=color.new(color.lime, 20), style=line.style_dashed, width=1)
+        line.delete(bullLockLine)
+        bullLockLine  := showLockLevel ? line.new(bullObBar, projBullLock, bar_index, projBullLock, color=color.new(color.blue, 25), style=line.style_dotted, width=2) : na
         bullInfoLabel := label.new(bar_index, projBullTP2, "OB LONG activo\nSL " + str.tostring(projBullSL, "#.##") +
-          "  TP1 " + str.tostring(projBullTP1, "#.##") + "  TP2 " + str.tostring(projBullTP2, "#.##"),
+          "  Asegura +" + str.tostring(lockR, "#.##") + "R " + str.tostring(projBullLock, "#.##") +
+          "\nTP1 " + str.tostring(projBullTP1, "#.##") + "  TP2 " + str.tostring(projBullTP2, "#.##"),
           style=label.style_label_down, color=color.new(color.green, 70), textcolor=color.white, size=size.small)
     else if bullFresh and not na(bullSLLine)
         line.set_x2(bullSLLine, bar_index)
         line.set_x2(bullTP1Line, bar_index)
         line.set_x2(bullTP2Line, bar_index)
+        if not na(bullLockLine)
+            line.set_x2(bullLockLine, bar_index)
         label.set_x(bullInfoLabel, bar_index)
         label.set_y(bullInfoLabel, projBullTP2)
     else if not bullFresh and not na(bullSLLine)
         line.delete(bullSLLine)
         line.delete(bullTP1Line)
         line.delete(bullTP2Line)
+        line.delete(bullLockLine)
         label.delete(bullInfoLabel)
         bullSLLine := na
         bullTP1Line := na
         bullTP2Line := na
+        bullLockLine := na
         bullInfoLabel := na
 
     if bearFormedNow
@@ -249,23 +273,30 @@ if showLevels
         bearSLLine    := line.new(bearObBar, projBearSL,  bar_index, projBearSL,  color=color.new(color.red, 20),  style=line.style_dashed, width=1)
         bearTP1Line   := line.new(bearObBar, projBearTP1, bar_index, projBearTP1, color=color.new(color.teal, 20), style=line.style_dashed, width=1)
         bearTP2Line   := line.new(bearObBar, projBearTP2, bar_index, projBearTP2, color=color.new(color.lime, 20), style=line.style_dashed, width=1)
+        line.delete(bearLockLine)
+        bearLockLine  := showLockLevel ? line.new(bearObBar, projBearLock, bar_index, projBearLock, color=color.new(color.blue, 25), style=line.style_dotted, width=2) : na
         bearInfoLabel := label.new(bar_index, projBearTP2, "OB SHORT activo\nSL " + str.tostring(projBearSL, "#.##") +
-          "  TP1 " + str.tostring(projBearTP1, "#.##") + "  TP2 " + str.tostring(projBearTP2, "#.##"),
+          "  Asegura +" + str.tostring(lockR, "#.##") + "R " + str.tostring(projBearLock, "#.##") +
+          "\nTP1 " + str.tostring(projBearTP1, "#.##") + "  TP2 " + str.tostring(projBearTP2, "#.##"),
           style=label.style_label_up, color=color.new(color.red, 70), textcolor=color.white, size=size.small)
     else if bearFresh and not na(bearSLLine)
         line.set_x2(bearSLLine, bar_index)
         line.set_x2(bearTP1Line, bar_index)
         line.set_x2(bearTP2Line, bar_index)
+        if not na(bearLockLine)
+            line.set_x2(bearLockLine, bar_index)
         label.set_x(bearInfoLabel, bar_index)
         label.set_y(bearInfoLabel, projBearTP2)
     else if not bearFresh and not na(bearSLLine)
         line.delete(bearSLLine)
         line.delete(bearTP1Line)
         line.delete(bearTP2Line)
+        line.delete(bearLockLine)
         label.delete(bearInfoLabel)
         bearSLLine := na
         bearTP1Line := na
         bearTP2Line := na
+        bearLockLine := na
         bearInfoLabel := na
 
 longZoneTouch  = bullFresh and not na(bullTop) and low  <= bullTop + entryBufferPts and low  >= bullBot
@@ -382,5 +413,24 @@ if tradeOpen and dir == -1
         beMoved  := true
         activeSL := entryPrice - riskPts*lockR
         label.new(bar_index, low, "→ Asegura +" + str.tostring(lockR, "#.##") + "R (" + str.tostring(beTriggerR, "#.##") + "R)", style=label.style_label_up, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+// ---- v14: caja de ganancia asegurada (solo visual) ----
+// Se dibuja entre el precio de entrada y el stop protegido, desde el momento
+// en que la protección se activa. Al cerrar la operación se suelta la
+// referencia sin borrarla, para que quede en el histórico del chart.
+if showLockZone
+    if tradeOpen and beMoved and not na(activeSL) and not na(entryPrice)
+        lockTop = math.max(entryPrice, activeSL)
+        lockBot = math.min(entryPrice, activeSL)
+        if na(lockZoneBox)
+            lockZoneBox := box.new(left=bar_index, top=lockTop, bottom=lockBot, right=bar_index,
+                 border_color=color.new(color.blue, 30), bgcolor=color.new(color.blue, 80),
+                 border_width=1, border_style=line.style_solid)
+        else
+            box.set_right(lockZoneBox, bar_index)
+            box.set_top(lockZoneBox, lockTop)
+            box.set_bottom(lockZoneBox, lockBot)
+    else if not tradeOpen and not na(lockZoneBox)
+        lockZoneBox := na
 
 bgcolor(inSession and inDateRange ? color.new(color.blue, 92) : na)
