@@ -1,0 +1,451 @@
+//@version=6
+strategy("ICT 15M OB Entry v15 - multi-zona", overlay=true,
+     initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
+     calc_on_every_tick=false, process_orders_on_close=true,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================
+// v15 — MULTI-ZONA. Cambio estructural del núcleo.
+//
+// PROBLEMA QUE RESUELVE: hasta v14 el script guardaba una sola variable
+// bullTop/bullBot. Al formarse un OB nuevo, el anterior se DESTRUÍA aunque
+// siguiera sin mitigar y fuese perfectamente operable. Solo podía seguir una
+// zona alcista y una bajista a la vez, así que únicamente aprovechaba los OB
+// "internos" entre desplazamientos consecutivos.
+//
+// AHORA: se mantiene un array de zonas vivas, cada una con su propio estado.
+// Una zona muere si (a) el precio toca su borde exacto, o (b) caduca por
+// antigüedad (zoneMaxAge).
+//
+// VALIDACIÓN (136.049 velas de 15M, 2020-11 a 2026-09, modelo realista:
+// bot por cierre de vela + slippage 1 tick + comisión):
+//     1 zona por lado (v14):  $130.935  PF 2,21  DD -$2.715  2 meses(-)
+//     multi, caduca 300:      $168.649  PF 2,39  DD -$2.264  2 meses(-)
+// Mejora +29% con MEJOR profit factor y MENOR drawdown a la vez.
+// Prueba de dos mitades: +29% en la 1ª y +29% en la 2ª — efecto estructural,
+// no un período afortunado. Ver /docs/MULTIZONA.md.
+//
+// OTRO CAMBIO: se elimina request.security(). Antes se pedía la temporalidad
+// "15" desde el propio gráfico de 15M, lo cual era redundante. Ahora calcula
+// de forma nativa, que es más simple y permite usar arrays. A cambio, el
+// script SOLO es válido en un gráfico de 15M: si no lo está, avisa en pantalla.
+//
+// Historial anterior: v6 BE anticipado / v10 TP1=1.8R / v11 asegura ganancia
+// real / v12 doble zona + alertas / v13 lockR=0.8 / v14 zona +0.8R visible.
+// ============================================================
+
+// ---------------- Inputs ----------------
+startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
+endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
+useSessionFilter = input.bool(true, "Aplicar filtro de sesión (18:00-11:00 NY)")
+dispLen        = input.int(20, "Barras para el rango promedio", minval=5, maxval=60)
+dispMult       = input.float(2.5, "Umbral de desplazamiento (x rango promedio)", minval=1.2, maxval=6.0)
+dispCloseFrac  = input.float(0.6, "Fracción mínima de cierre direccional", minval=0.3, maxval=1.0)
+obScanBars     = input.int(10, "Barras hacia atrás para la vela de origen", minval=3, maxval=30)
+liqCheckBars   = input.int(12, "Ventana para revisar liquidez detrás del OB", minval=3, maxval=40)
+liqTolerancePts= input.float(4.0, "Tolerancia (pts) para 'testear' el mismo nivel", minval=0)
+liqAccumBars   = input.int(6, "Barras consecutivas que invalidan liquidez limpia", minval=2, maxval=20)
+zoneMaxAge     = input.int(300, "Velas que una zona sigue viva sin ser tocada", minval=20, maxval=2000)
+maxZones       = input.int(40, "Máximo de zonas vivas simultáneas (protección)", minval=4, maxval=100)
+slBufferPts    = input.float(2.0, "Buffer (pts) más allá del OB para el SL", minval=0)
+entryBufferPts = input.float(12.0, "Margen (pts) de entrada más allá del borde", minval=0)
+rr1            = input.float(1.8, "TP1 (múltiplo de R) — cierra 2 contratos")
+rr2            = input.float(4.0, "TP2 (múltiplo de R) — cierra el contrato restante")
+useRiskCap     = input.bool(true, "Descartar señal si el stop supera el tope")
+maxRiskPts     = input.float(100.0, "Tope máximo de riesgo por operación (pts)", minval=10)
+beTriggerR     = input.float(1.2, "Activar protección al alcanzar este múltiplo de R", minval=0, maxval=2)
+lockR          = input.float(0.8, "Ganancia a asegurar en ese punto (múltiplo de R)", minval=0, maxval=2)
+showZones      = input.bool(true, "Dibujar las zonas OB vivas")
+showWideZone   = input.bool(true, "Dibujar la zona ampliada (OB + margen de entrada)")
+showLevels     = input.bool(true, "Dibujar SL/+lockR/TP1/TP2 de la zona más reciente de cada lado")
+showLockZone   = input.bool(true, "Dibujar la caja de ganancia asegurada al activarse")
+
+// ---------------- Aviso de temporalidad ----------------
+// v15 calcula de forma nativa: solo es válido en 15M.
+if barstate.islast and timeframe.period != "15"
+    label.new(bar_index, high, "⚠ Este script está diseñado para 15M.\nTemporalidad actual: " + timeframe.period +
+      "\nLos resultados NO son válidos aquí.",
+      style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black, size=size.large)
+
+inDateRange = time >= startDate and time <= endDate
+nyMinOfDay  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+inSession   = useSessionFilter ? (nyMinOfDay >= 1080 or nyMinOfDay < 660) : true   // 18:00-11:00 NY
+
+// ---------------- Tipo Zona ----------------
+type Zone
+    int   dir        // 1 = alcista, -1 = bajista
+    float top
+    float bot
+    bool  cleared    // el precio ya se alejó limpiamente del OB
+    int   born       // bar_index en que se formó
+    box   bx
+    box   bxWide
+
+var array<Zone> zones = array.new<Zone>()
+
+// ---------------- Detección de desplazamiento ----------------
+avgRange = ta.sma(high - low, dispLen)
+rng      = high - low
+isDisp   = rng >= dispMult * avgRange[1]
+bullDisp = isDisp and close > open and (close - low) >= dispCloseFrac * rng
+bearDisp = isDisp and close < open and (high - close) >= dispCloseFrac * rng
+
+// ---------------- 1) Formar zonas nuevas ----------------
+if bullDisp
+    idx = -1
+    for i = 1 to obScanBars
+        if close[i] < open[i]
+            idx := i
+            break
+    if idx != -1
+        candBot   = low[idx]
+        maxStreak = 0
+        curStreak = 0
+        for j = idx + 1 to idx + liqCheckBars
+            if low[j] <= candBot + liqTolerancePts
+                curStreak += 1
+                maxStreak := math.max(maxStreak, curStreak)
+            else
+                curStreak := 0
+        if maxStreak < liqAccumBars
+            nb = showZones ? box.new(bar_index - idx, high[idx], bar_index, candBot,
+                 border_color=color.new(color.green, 20), bgcolor=color.new(color.green, 88), border_width=2) : na
+            nw = showWideZone ? box.new(bar_index - idx, high[idx] + entryBufferPts, bar_index, candBot,
+                 border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 95),
+                 border_width=1, border_style=line.style_dashed) : na
+            array.push(zones, Zone.new(1, high[idx], candBot, false, bar_index, nb, nw))
+
+if bearDisp
+    idx2 = -1
+    for i = 1 to obScanBars
+        if close[i] > open[i]
+            idx2 := i
+            break
+    if idx2 != -1
+        candTop    = high[idx2]
+        maxStreak2 = 0
+        curStreak2 = 0
+        for j = idx2 + 1 to idx2 + liqCheckBars
+            if high[j] >= candTop - liqTolerancePts
+                curStreak2 += 1
+                maxStreak2 := math.max(maxStreak2, curStreak2)
+            else
+                curStreak2 := 0
+        if maxStreak2 < liqAccumBars
+            nb2 = showZones ? box.new(bar_index - idx2, candTop, bar_index, low[idx2],
+                 border_color=color.new(color.red, 20), bgcolor=color.new(color.red, 88), border_width=2) : na
+            nw2 = showWideZone ? box.new(bar_index - idx2, candTop, bar_index, low[idx2] - entryBufferPts,
+                 border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 95),
+                 border_width=1, border_style=line.style_dashed) : na
+            array.push(zones, Zone.new(-1, candTop, low[idx2], false, bar_index, nb2, nw2))
+
+// Protección: si hay demasiadas zonas vivas, elimina las más antiguas.
+while array.size(zones) > maxZones
+    zOld = array.shift(zones)
+    box.delete(zOld.bx)
+    box.delete(zOld.bxWide)
+
+// ---------------- 2) Actualizar 'cleared' con la vela actual ----------------
+// (mismo orden que las versiones anteriores: cleared se actualiza ANTES de
+//  evaluar la entrada, así una zona puede aclararse y entrar en la misma vela)
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        z = array.get(zones, i)
+        if z.born != bar_index and not z.cleared
+            if z.dir == 1 and low > z.top
+                z.cleared := true
+            else if z.dir == -1 and high < z.bot
+                z.cleared := true
+
+// ---------------- 3) Estado de la operación ----------------
+var bool  tradeOpen  = false
+var int   dir        = 0
+var float entryPrice = na
+var float activeSL   = na
+var float origSL     = na
+var float riskPts    = na
+var bool  tp1Hit     = false
+var bool  beMoved    = false
+
+canEnter = inSession and inDateRange and not tradeOpen
+
+// ---------------- 4) Buscar candidata de entrada ----------------
+// Si varias zonas se tocan en la misma vela, se toma la MÁS RECIENTE.
+float candEntry = na
+float candSL    = na
+float candRisk  = na
+int   candDir   = 0
+int   candBorn  = -1
+float rejRisk   = na
+int   rejDir    = 0
+
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        z = array.get(zones, i)
+        if z.born != bar_index and z.cleared and (bar_index - z.born) <= zoneMaxAge
+            if z.dir == 1 and low <= z.top + entryBufferPts and low >= z.bot
+                e = math.max(low, z.top)
+                x = z.bot - slBufferPts
+                r = e - x
+                if r > 0 and (not useRiskCap or r <= maxRiskPts)
+                    if z.born > candBorn
+                        candEntry := e
+                        candSL    := x
+                        candRisk  := r
+                        candDir   := 1
+                        candBorn  := z.born
+                else if r > 0
+                    rejRisk := r
+                    rejDir  := 1
+            if z.dir == -1 and high >= z.bot - entryBufferPts and high <= z.top
+                e2 = math.min(high, z.bot)
+                x2 = z.top + slBufferPts
+                r2 = x2 - e2
+                if r2 > 0 and (not useRiskCap or r2 <= maxRiskPts)
+                    if z.born > candBorn
+                        candEntry := e2
+                        candSL    := x2
+                        candRisk  := r2
+                        candDir   := -1
+                        candBorn  := z.born
+                else if r2 > 0
+                    rejRisk := r2
+                    rejDir  := -1
+
+// ---------------- 5) Retirar zonas caducadas o consumidas ----------------
+// Se recorre hacia atrás para poder borrar sin romper los índices.
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        z = array.get(zones, i)
+        expired  = (bar_index - z.born) > zoneMaxAge
+        consumed = z.born != bar_index and z.cleared and
+                   ((z.dir == 1 and low <= z.top) or (z.dir == -1 and high >= z.bot))
+        if expired or consumed
+            box.delete(z.bx)
+            box.delete(z.bxWide)
+            array.remove(zones, i)
+        else
+            if not na(z.bx)
+                box.set_right(z.bx, bar_index)
+            if not na(z.bxWide)
+                box.set_right(z.bxWide, bar_index)
+
+// ---------------- 6) Entrada ----------------
+if canEnter and candDir != 0
+    entryPrice := candEntry
+    origSL     := candSL
+    activeSL   := candSL
+    riskPts    := candRisk
+    tp1Hit     := false
+    beMoved    := false
+    tradeOpen  := true
+    dir        := candDir
+    lockPx = candDir == 1 ? candEntry + candRisk * lockR : candEntry - candRisk * lockR
+    tp1Px  = candDir == 1 ? candEntry + candRisk * rr1   : candEntry - candRisk * rr1
+    tp2Px  = candDir == 1 ? candEntry + candRisk * rr2   : candEntry - candRisk * rr2
+    txt = (candDir == 1 ? "LONG " : "SHORT ") + str.tostring(candEntry, "#.##") +
+      "\nSL " + str.tostring(candSL, "#.##") +
+      "\nAsegura +" + str.tostring(lockR, "#.##") + "R @ " + str.tostring(lockPx, "#.##") +
+      "\nTP1 " + str.tostring(tp1Px, "#.##") +
+      "\nTP2 " + str.tostring(tp2Px, "#.##")
+    if candDir == 1
+        label.new(bar_index, low, txt, style=label.style_label_up, color=color.green,
+             textcolor=color.white, yloc=yloc.belowbar, size=size.small)
+    else
+        label.new(bar_index, high, txt, style=label.style_label_down, color=color.red,
+             textcolor=color.white, yloc=yloc.abovebar, size=size.small)
+
+if canEnter and candDir == 0 and not na(rejRisk)
+    if rejDir == 1
+        label.new(bar_index, low, "◌ descartada: stop " + str.tostring(rejRisk, "#.#") + " pts > tope " +
+             str.tostring(maxRiskPts, "#.#"), style=label.style_label_up,
+             color=color.new(color.gray, 60), textcolor=color.white, size=size.tiny)
+    else
+        label.new(bar_index, high, "◌ descartada: stop " + str.tostring(rejRisk, "#.#") + " pts > tope " +
+             str.tostring(maxRiskPts, "#.#"), style=label.style_label_down,
+             color=color.new(color.gray, 60), textcolor=color.white, size=size.tiny)
+
+// ---------------- 7) Gestión de la operación ----------------
+if tradeOpen and dir == 1
+    tp1 = entryPrice + riskPts * rr1
+    tp2 = entryPrice + riskPts * rr2
+    hitSL  = low <= activeSL
+    hitTP1 = not tp1Hit and high >= tp1
+    hitTP2 = tp1Hit and high >= tp2
+    reachedR = (high - entryPrice) / riskPts
+    if hitSL
+        if beMoved and not tp1Hit
+            label.new(bar_index, low, "= Cerrado asegurando +" + str.tostring(lockR, "#.##") + "R",
+                 style=label.style_label_up, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+        else if tp1Hit
+            label.new(bar_index, low, "✓ TP1+BE (contrato final protegido)", style=label.style_label_up,
+                 color=color.new(color.yellow, 0), textcolor=color.black, size=size.normal)
+        else
+            label.new(bar_index, low, "✗ PÉRDIDA TOTAL (3 contratos)", style=label.style_label_up,
+                 color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+        tradeOpen := false
+    else if hitTP1
+        tp1Hit   := true
+        beMoved  := true
+        activeSL := math.max(activeSL, entryPrice + riskPts * lockR)
+        label.new(bar_index, high, "✓ TP1 (2 contratos) — SL restante protegido", style=label.style_label_down,
+             color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+    else if hitTP2
+        label.new(bar_index, high, "✓✓ TP1+TP2 (los 3 contratos en ganancia)", style=label.style_label_down,
+             color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpen := false
+    else if beTriggerR > 0 and not beMoved and reachedR >= beTriggerR
+        beMoved  := true
+        activeSL := entryPrice + riskPts * lockR
+        label.new(bar_index, high, "→ Asegura +" + str.tostring(lockR, "#.##") + "R (" +
+             str.tostring(beTriggerR, "#.##") + "R)", style=label.style_label_down,
+             color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+if tradeOpen and dir == -1
+    tp1 = entryPrice - riskPts * rr1
+    tp2 = entryPrice - riskPts * rr2
+    hitSL  = high >= activeSL
+    hitTP1 = not tp1Hit and low <= tp1
+    hitTP2 = tp1Hit and low <= tp2
+    reachedR = (entryPrice - low) / riskPts
+    if hitSL
+        if beMoved and not tp1Hit
+            label.new(bar_index, high, "= Cerrado asegurando +" + str.tostring(lockR, "#.##") + "R",
+                 style=label.style_label_down, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+        else if tp1Hit
+            label.new(bar_index, high, "✓ TP1+BE (contrato final protegido)", style=label.style_label_down,
+                 color=color.new(color.yellow, 0), textcolor=color.black, size=size.normal)
+        else
+            label.new(bar_index, high, "✗ PÉRDIDA TOTAL (3 contratos)", style=label.style_label_down,
+                 color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+        tradeOpen := false
+    else if hitTP1
+        tp1Hit   := true
+        beMoved  := true
+        activeSL := math.min(activeSL, entryPrice - riskPts * lockR)
+        label.new(bar_index, low, "✓ TP1 (2 contratos) — SL restante protegido", style=label.style_label_up,
+             color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+    else if hitTP2
+        label.new(bar_index, low, "✓✓ TP1+TP2 (los 3 contratos en ganancia)", style=label.style_label_up,
+             color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpen := false
+    else if beTriggerR > 0 and not beMoved and reachedR >= beTriggerR
+        beMoved  := true
+        activeSL := entryPrice - riskPts * lockR
+        label.new(bar_index, low, "→ Asegura +" + str.tostring(lockR, "#.##") + "R (" +
+             str.tostring(beTriggerR, "#.##") + "R)", style=label.style_label_up,
+             color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+// ---------------- 8) Niveles de la zona más reciente de cada lado ----------------
+var line  bullSLLine   = na
+var line  bullLockLine = na
+var line  bullTP1Line  = na
+var line  bullTP2Line  = na
+var line  bearSLLine   = na
+var line  bearLockLine = na
+var line  bearTP1Line  = na
+var line  bearTP2Line  = na
+var label bullInfo     = na
+var label bearInfo     = na
+
+if showLevels
+    // localizar la zona viva más reciente de cada lado
+    float bT = na
+    float bB = na
+    float sT = na
+    float sB = na
+    int   bBorn = -1
+    int   sBorn = -1
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            z = array.get(zones, i)
+            if z.dir == 1 and z.born > bBorn
+                bT := z.top
+                bB := z.bot
+                bBorn := z.born
+            if z.dir == -1 and z.born > sBorn
+                sT := z.top
+                sB := z.bot
+                sBorn := z.born
+
+    // se redibujan cada vela: borrar los anteriores para no acumular objetos
+    line.delete(bullSLLine)
+    line.delete(bullLockLine)
+    line.delete(bullTP1Line)
+    line.delete(bullTP2Line)
+    label.delete(bullInfo)
+    bullSLLine   := na
+    bullLockLine := na
+    bullTP1Line  := na
+    bullTP2Line  := na
+    bullInfo     := na
+
+    if not na(bT)
+        rB    = bT - (bB - slBufferPts)
+        slB   = bB - slBufferPts
+        lockB = bT + rB * lockR
+        t1B   = bT + rB * rr1
+        t2B   = bT + rB * rr2
+        bullSLLine   := line.new(bBorn, slB,   bar_index, slB,   color=color.new(color.red, 20),  style=line.style_dashed, width=1)
+        bullLockLine := line.new(bBorn, lockB, bar_index, lockB, color=color.new(color.blue, 25), style=line.style_dotted, width=2)
+        bullTP1Line  := line.new(bBorn, t1B,   bar_index, t1B,   color=color.new(color.teal, 20), style=line.style_dashed, width=1)
+        bullTP2Line  := line.new(bBorn, t2B,   bar_index, t2B,   color=color.new(color.lime, 20), style=line.style_dashed, width=1)
+        bullInfo     := label.new(bar_index, t2B, "OB LONG activo\nSL " + str.tostring(slB, "#.##") +
+             "  Asegura +" + str.tostring(lockR, "#.##") + "R " + str.tostring(lockB, "#.##") +
+             "\nTP1 " + str.tostring(t1B, "#.##") + "  TP2 " + str.tostring(t2B, "#.##"),
+             style=label.style_label_down, color=color.new(color.green, 70), textcolor=color.white, size=size.small)
+
+    line.delete(bearSLLine)
+    line.delete(bearLockLine)
+    line.delete(bearTP1Line)
+    line.delete(bearTP2Line)
+    label.delete(bearInfo)
+    bearSLLine   := na
+    bearLockLine := na
+    bearTP1Line  := na
+    bearTP2Line  := na
+    bearInfo     := na
+
+    if not na(sB)
+        rS    = (sT + slBufferPts) - sB
+        slS   = sT + slBufferPts
+        lockS = sB - rS * lockR
+        t1S   = sB - rS * rr1
+        t2S   = sB - rS * rr2
+        bearSLLine   := line.new(sBorn, slS,   bar_index, slS,   color=color.new(color.red, 20),  style=line.style_dashed, width=1)
+        bearLockLine := line.new(sBorn, lockS, bar_index, lockS, color=color.new(color.blue, 25), style=line.style_dotted, width=2)
+        bearTP1Line  := line.new(sBorn, t1S,   bar_index, t1S,   color=color.new(color.teal, 20), style=line.style_dashed, width=1)
+        bearTP2Line  := line.new(sBorn, t2S,   bar_index, t2S,   color=color.new(color.lime, 20), style=line.style_dashed, width=1)
+        bearInfo     := label.new(bar_index, t2S, "OB SHORT activo\nSL " + str.tostring(slS, "#.##") +
+             "  Asegura +" + str.tostring(lockR, "#.##") + "R " + str.tostring(lockS, "#.##") +
+             "\nTP1 " + str.tostring(t1S, "#.##") + "  TP2 " + str.tostring(t2S, "#.##"),
+             style=label.style_label_up, color=color.new(color.red, 70), textcolor=color.white, size=size.small)
+
+// ---------------- 9) Caja de ganancia asegurada ----------------
+var box lockZoneBox = na
+if showLockZone
+    if tradeOpen and beMoved and not na(activeSL) and not na(entryPrice)
+        lockTop = math.max(entryPrice, activeSL)
+        lockBot = math.min(entryPrice, activeSL)
+        if na(lockZoneBox)
+            lockZoneBox := box.new(bar_index, lockTop, bar_index, lockBot,
+                 border_color=color.new(color.blue, 30), bgcolor=color.new(color.blue, 80), border_width=1)
+        else
+            box.set_right(lockZoneBox, bar_index)
+            box.set_top(lockZoneBox, lockTop)
+            box.set_bottom(lockZoneBox, lockBot)
+    else if not tradeOpen and not na(lockZoneBox)
+        lockZoneBox := na
+
+// ---------------- 10) Alertas ----------------
+alertcondition(bullDisp, title="Nueva zona LONG detectada",
+     message="{{ticker}}: nueva zona de COMPRA formada")
+alertcondition(bearDisp, title="Nueva zona SHORT detectada",
+     message="{{ticker}}: nueva zona de VENTA formada")
+
+// ---------------- 11) Diagnóstico ----------------
+plot(array.size(zones), "Zonas vivas", display=display.data_window)
+plot(tradeOpen ? 1 : 0, "Operacion abierta", display=display.data_window)
+
+bgcolor(inSession and inDateRange ? color.new(color.blue, 92) : na)
