@@ -10,32 +10,27 @@ strategy("ICT 15M OB Entry v15 - multi-zona", overlay=true,
 //
 // PROBLEMA QUE RESUELVE: hasta v14 el script guardaba una sola variable
 // bullTop/bullBot. Al formarse un OB nuevo, el anterior se DESTRUÍA aunque
-// siguiera sin mitigar y fuese perfectamente operable. Solo podía seguir una
-// zona alcista y una bajista a la vez, así que únicamente aprovechaba los OB
-// "internos" entre desplazamientos consecutivos.
+// siguiera sin mitigar y fuese perfectamente operable.
 //
-// AHORA: se mantiene un array de zonas vivas, cada una con su propio estado.
-// Una zona muere si (a) el precio toca su borde exacto, o (b) caduca por
-// antigüedad (zoneMaxAge).
+// AHORA: array de zonas vivas, cada una con su estado. Una zona muere si
+// (a) el precio toca su borde exacto, o (b) caduca por antigüedad.
+//
+// CORRIGE ADEMÁS un desajuste real: hasta v14, al tocar TP1 el stop del
+// contrato corredor iba a BREAKEVEN, mientras que el motor de backtest
+// validado lo movía al nivel asegurado (+lockR). El script rendía menos que
+// su propio backtest. Ahora ambos coinciden.
 //
 // VALIDACIÓN (136.049 velas de 15M, 2020-11 a 2026-09, modelo realista:
 // bot por cierre de vela + slippage 1 tick + comisión):
-//     1 zona por lado (v14):  $130.935  PF 2,21  DD -$2.715  2 meses(-)
-//     multi, caduca 300:      $168.649  PF 2,39  DD -$2.264  2 meses(-)
-// Mejora +29% con MEJOR profit factor y MENOR drawdown a la vez.
-// Prueba de dos mitades: +29% en la 1ª y +29% en la 2ª — efecto estructural,
-// no un período afortunado. Ver /docs/MULTIZONA.md.
+//     v14 tal como estaba:  $118.635  PF 2,12  DD -$2.715  7 meses(-)
+//     v15 multi + TP1 fix:  $168.649  PF 2,39  DD -$2.264  2 meses(-)
+// Prueba de dos mitades: +29% en la 1ª y +29% en la 2ª. Ver /docs/MULTIZONA.md
 //
-// OTRO CAMBIO: se elimina request.security(). Antes se pedía la temporalidad
-// "15" desde el propio gráfico de 15M, lo cual era redundante. Ahora calcula
-// de forma nativa, que es más simple y permite usar arrays. A cambio, el
-// script SOLO es válido en un gráfico de 15M: si no lo está, avisa en pantalla.
-//
-// Historial anterior: v6 BE anticipado / v10 TP1=1.8R / v11 asegura ganancia
-// real / v12 doble zona + alertas / v13 lockR=0.8 / v14 zona +0.8R visible.
+// OTRO CAMBIO: se elimina request.security(). Antes se pedía "15" desde el
+// propio gráfico de 15M, lo cual era redundante. Ahora calcula de forma
+// nativa. A cambio el script SOLO es válido en 15M: si no, avisa en pantalla.
 // ============================================================
 
-// ---------------- Inputs ----------------
 startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
 endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
 useSessionFilter = input.bool(true, "Aplicar filtro de sesión (18:00-11:00 NY)")
@@ -61,8 +56,6 @@ showWideZone   = input.bool(true, "Dibujar la zona ampliada (OB + margen de entr
 showLevels     = input.bool(true, "Dibujar SL/+lockR/TP1/TP2 de la zona más reciente de cada lado")
 showLockZone   = input.bool(true, "Dibujar la caja de ganancia asegurada al activarse")
 
-// ---------------- Aviso de temporalidad ----------------
-// v15 calcula de forma nativa: solo es válido en 15M.
 if barstate.islast and timeframe.period != "15"
     label.new(bar_index, high, "⚠ Este script está diseñado para 15M.\nTemporalidad actual: " + timeframe.period +
       "\nLos resultados NO son válidos aquí.",
@@ -70,21 +63,19 @@ if barstate.islast and timeframe.period != "15"
 
 inDateRange = time >= startDate and time <= endDate
 nyMinOfDay  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
-inSession   = useSessionFilter ? (nyMinOfDay >= 1080 or nyMinOfDay < 660) : true   // 18:00-11:00 NY
+inSession   = useSessionFilter ? (nyMinOfDay >= 1080 or nyMinOfDay < 660) : true
 
-// ---------------- Tipo Zona ----------------
 type Zone
-    int   dir        // 1 = alcista, -1 = bajista
+    int   dir
     float top
     float bot
-    bool  cleared    // el precio ya se alejó limpiamente del OB
-    int   born       // bar_index en que se formó
+    bool  cleared
+    int   born
     box   bx
     box   bxWide
 
 var array<Zone> zones = array.new<Zone>()
 
-// ---------------- Detección de desplazamiento ----------------
 avgRange = ta.sma(high - low, dispLen)
 rng      = high - low
 isDisp   = rng >= dispMult * avgRange[1]
@@ -140,15 +131,12 @@ if bearDisp
                  border_width=1, border_style=line.style_dashed) : na
             array.push(zones, Zone.new(-1, candTop, low[idx2], false, bar_index, nb2, nw2))
 
-// Protección: si hay demasiadas zonas vivas, elimina las más antiguas.
 while array.size(zones) > maxZones
     zOld = array.shift(zones)
     box.delete(zOld.bx)
     box.delete(zOld.bxWide)
 
 // ---------------- 2) Actualizar 'cleared' con la vela actual ----------------
-// (mismo orden que las versiones anteriores: cleared se actualiza ANTES de
-//  evaluar la entrada, así una zona puede aclararse y entrar en la misma vela)
 if array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         z = array.get(zones, i)
@@ -170,8 +158,7 @@ var bool  beMoved    = false
 
 canEnter = inSession and inDateRange and not tradeOpen
 
-// ---------------- 4) Buscar candidata de entrada ----------------
-// Si varias zonas se tocan en la misma vela, se toma la MÁS RECIENTE.
+// ---------------- 4) Buscar candidata de entrada (la zona MÁS RECIENTE) ----------------
 float candEntry = na
 float candSL    = na
 float candRisk  = na
@@ -214,13 +201,11 @@ if array.size(zones) > 0
                     rejDir  := -1
 
 // ---------------- 5) Retirar zonas caducadas o consumidas ----------------
-// Se recorre hacia atrás para poder borrar sin romper los índices.
 if array.size(zones) > 0
     for i = array.size(zones) - 1 to 0
         z = array.get(zones, i)
         expired  = (bar_index - z.born) > zoneMaxAge
-        consumed = z.born != bar_index and z.cleared and
-                   ((z.dir == 1 and low <= z.top) or (z.dir == -1 and high >= z.bot))
+        consumed = z.born != bar_index and z.cleared and ((z.dir == 1 and low <= z.top) or (z.dir == -1 and high >= z.bot))
         if expired or consumed
             box.delete(z.bx)
             box.delete(z.bxWide)
@@ -350,7 +335,6 @@ var label bullInfo     = na
 var label bearInfo     = na
 
 if showLevels
-    // localizar la zona viva más reciente de cada lado
     float bT = na
     float bB = na
     float sT = na
@@ -369,7 +353,6 @@ if showLevels
                 sB := z.bot
                 sBorn := z.born
 
-    // se redibujan cada vela: borrar los anteriores para no acumular objetos
     line.delete(bullSLLine)
     line.delete(bullLockLine)
     line.delete(bullTP1Line)
