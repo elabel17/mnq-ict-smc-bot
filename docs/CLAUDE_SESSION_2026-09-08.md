@@ -732,3 +732,32 @@ Con el filtro de 1H, 4 contratos da DD $2.130 (excede $1.900 por ~$230); 3 contr
 Se aplicó al script real de TradingView: doble sesión (mañana/noche con regímenes independientes, incluido estado de posición completamente separado por sesión — no comparten "operación abierta"), filtro de sesgo de 1H, y **un fix de causalidad adicional encontrado en el proceso**: el script real NUNCA había tenido el fix de "no gestionar SL/TP en la misma vela de la entrada" que sí lleva el motor Python desde 2026-09-08 — se corrigió por primera vez aquí. Compilado sin errores y verificado corriendo en vivo (capturas de pantalla confirmando etiquetas `[MANANA]`/`[NOCHE]`).
 
 **Pendiente para el usuario:** revisar manualmente 8 operaciones de muestra (5 pérdidas totales + 3 ganadoras, con fecha/hora/precio exactos) para aportar contexto visual/manual que el diagnóstico sistemático no pudo capturar, dado que el usuario reporta experiencia manual de mayor rentabilidad nocturna que la que refleja el backtest.
+
+### 9. Estimación estacional septiembre-diciembre (con 4 contratos) — motivada por el objetivo de pasar la cuenta lo antes posible
+
+El usuario decidió proceder con 4 contratos (ver punto 7) y pidió una estimación de rendimiento específica para sep-dic (no el promedio anual completo), ya que su prioridad es alcanzar el objetivo de +$3.000 de la cuenta de fondeo cuanto antes.
+
+**Rendimiento histórico por mes calendario (todos los años, 4 contratos, filtro 1H, script `claude_sep_dec_analysis.py`):** octubre y noviembre son los meses más débiles del año (~$1.200-1.300 promedio/mes), marzo y diciembre los más fuertes (~$3.000-3.300/mes). Sep-Dic combinados promedian **$6.830 por temporada completa** (mín. histórico $5.404 en 2020, máx. $12.999 en 2023) — consistentemente positivo en las 6 temporadas disponibles, pero no el tramo más fuerte del año.
+
+**Estimación de tiempo hasta +$3.000 usando SOLO el histórico de sep-dic** (bootstrap por bloques, `claude_sep_dec_bootstrap.py`, pool de 230 trades reales de esa temporada, no el pool anual completo):
+
+| | |
+|---|---|
+| Probabilidad de llegar a +$3.000 antes de -$1.900 | 96.1%-99.5% (según regla de DD estática/trailing) |
+| Operaciones típicas (mediana) | 15 |
+| Ritmo histórico de la temporada | ~2.2 trades/semana |
+| **Tiempo estimado (mediana)** | **~7 semanas** |
+| Rango realista (p10-p90) | 3 a 14.5 semanas |
+
+Advertencia ya comunicada al usuario: 6 temporadas es una muestra pequeña para tratar esto como una predicción precisa — es la mejor estimación disponible con los datos que hay, no una garantía. Si las primeras semanas caen en octubre/noviembre (los meses más flojos), el ritmo puede sentirse más lento que el promedio sin que eso sea señal de que algo está mal.
+
+## 📋 Pendientes abiertos al cierre de la sesión 2026-09-09 (para retomar)
+
+1. **Confirmar con la prop firm si el límite de $1.900 es estático o trailing** — cambia el análisis de riesgo real, no verificable por mí.
+2. Confirmar comisión/slippage reales del bróker (se usó $0.47/contrato/lado y 1 tick como supuesto).
+3. Forward-test en simulador antes de arriesgar la cuenta real — todo lo hecho hasta ahora es backtest.
+4. Revisión manual pendiente del usuario de los 8 trades de muestra nocturnos (punto 8 arriba).
+5. Limpiar la confusión de nombres de script en TradingView (v18 vive en "v12 - alertas + doble zona", no en "el mio") — funciona igual, pero conviene ordenarlo.
+6. Discrepancia del grid de TP1 contra el motor JS de referencia de la otra sesión — nunca reconciliada (pendiente desde antes del 2026-09-08).
+7. Plan de escalamiento de contratos después de pasar la cuenta (¿5 contratos? ¿cuándo?) — no definido aún.
+8. NinjaScript (`ICT_OB_Strategy.cs`) para automatización — borrador sin testear, no tocado esta sesión.
