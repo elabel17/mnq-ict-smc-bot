@@ -1,18 +1,24 @@
 # Análisis crítico — Estrategia ICT 15M OB Entry
 
-Última actualización: 2026-09-08 (noche) — fix causal aplicado al script real
+Última actualización: 2026-09-09 — doble sesión (mañana/noche) + sesgo 1H aplicado al script real
 
 ## 📌 RESUMEN PARA SESIÓN NUEVA / OTRA PC (leer esto primero)
 
-- **Script real vigente:** `pine/ICT_15M_OB_Entry_v15.pine` en el repo GitHub `elabel17/mnq-ict-smc-bot` = copia exacta del script en la cuenta de TradingView del usuario (`ICT 15M OB Entry v15 - multi-zona`, id `USER;8f652c4b1fd5403b918416fd4587f7e2`), ya con el fix de entrada causal aplicado y verificado el 2026-09-08.
-- **Número de referencia oficial actual:** $105.254,82 netos, 1.459 trades, PF 1,649, winrate 56,1%, max DD $3.872,06, sobre 6,27 años (2020-05-31 a 2026-09-08), MNQ 15m, 3 contratos, lockR 0,8R. Ver sección "✅ FIX CAUSAL APLICADO AL SCRIPT REAL" al final de este documento para el detalle completo.
-- **Cualquier cifra anterior (152k, 214k, 168k) está obsoleta** — todas corresponden a versiones del motor con al menos un sesgo de look-ahead ya corregido. No las uses para decisiones.
-- **Motor Python de referencia:** `data/engine/python/claude_engine.py` en el repo (= `Downloads/mnq_dataset/engine.py` local), ya sincronizado con el fix causal.
+- **Script real vigente:** `pine/ICT_15M_OB_Entry_v18.pine` en el repo GitHub `elabel17/mnq-ict-smc-bot`. ⚠️ **Por un bug de la herramienta MCP usada para editar Pine Script, este código terminó guardado en TradingView bajo el script llamado "ICT 15M OB Entry v12 - alertas + doble zona"** (`id USER;863c808793d541e8aa640cdb7d734d8a`), NO en el script histórico "ICT 1H Liquidity Bias + 15M OB Entry el mio" (`id USER;8f652c4b1fd5403b918416fd4587f7e2`, que sigue intacto con la lógica v15/v16 anterior, sin tocar). El usuario decidió dejarlo así por ahora — **el script que hay que mirar en el chart es "ICT 15M OB Entry v18 - dual-sesion + sesgo 1H"**, verificado corriendo en vivo el 2026-09-09.
+- **Número de referencia oficial actual (histórico completo, 6.27 años, 3 contratos, filtro 1H aplicado):** Net $121.696, PF 3.08, Winrate 67.9%, Max DD $1.598 (mañana+noche combinadas). Con 4 contratos: Net $162.261, PF 3.08, Max DD $2.130 (excede el límite de cuenta de $1.900 del usuario por ~$230, decisión aceptada por el usuario tras confirmar que ese evento es raro — 3 veces en 6.27 años, ninguna en sep-dic).
+- **Cualquier cifra anterior a esta sesión (105k, 152k, 214k, 168k) está obsoleta.**
+- **Motores Python de referencia (todos en el repo, todos verificados contra el numero de referencia antes de usarse):**
+  - `claude_engine2.py`: generaliza TP1/TP2/BE como parámetros de función, separa selección de trades (`select_trades`) de conversión a dólares (`price_trades`) para grids rápidos.
+  - `claude_engine3.py`: además generaliza los parámetros de DETECCIÓN (disp_mult, liq_accum_bars, liq_tolerance_pts, entry_buffer_pts, sl_buffer_pts) — usado para la búsqueda de la configuración nocturna.
+  - `claude_engine4.py`: como engine3 pero además captura metadatos de diagnóstico por trade (ancho de zona, profundidad de entrada, volumen, etc.) — usado para el análisis de pérdidas totales.
+  - `claude_session_config.py`: implementa y documenta los 2 regímenes (mañana/noche) con sus parámetros propios.
+- **Metodología (aplicada en TODO lo nuevo de esta sesión):** cualquier hallazgo se valida con holdout limpio 70% in-sample / 30% out-of-sample (nunca tocado al elegir parámetros) antes de reportarse como real.
 - **Pendiente sin resolver (para retomar):**
-  1. El grid search de TP1/TP2 documentado en este archivo usó el motor CON el sesgo (antes del fix causal) — hay que re-correrlo con el motor actualizado antes de sacar conclusiones sobre si 1,8R/4R siguen siendo óptimos.
-  2. Discrepancia sin reconciliar: el grid de TP1 de este motor sube casi monótono hasta ~3,2R, contradiciendo el "1,8R óptimo" documentado en `docs/DECISIONS.md` del motor de referencia JS de la otra sesión — falta comparar ambos motores línea a línea en ese punto específico.
-  3. Automatización vía NinjaTrader: `ICT_OB_Strategy.cs` es un primer borrador SIN TESTEAR, pendiente de validar en Sim antes de confiar en él.
-  4. VPS y confirmación con Lucid Trading sobre permisos de trading algorítmico: quedan a cargo del usuario, no verificables por mí.
+  1. Prioridad alta: decidir si limpiar la confusión de nombres de script en TradingView (renombrar/eliminar duplicados) — ver aviso arriba.
+  2. El grid de TP1 sigue sin reconciliarse contra el motor JS de referencia de la otra sesión (ver secciones anteriores) — no se retomó esta sesión.
+  3. Automatización vía NinjaTrader: `ICT_OB_Strategy.cs` sigue sin testear.
+  4. VPS y confirmación con Lucid Trading: a cargo del usuario.
+  5. El usuario va a revisar manualmente 8 trades nocturnos de muestra (con fecha/hora exactas, ver sección de hoy) para aportar contexto que el análisis sistemático no pudo capturar — retomar cuando dé su feedback.
 - **Lección de proceso importante:** cualquier fix al backtest debe cuestionarse por causalidad — ¿el precio/nivel usado se conocía ANTES de que ocurriera, o requiere conocer el resto de una vela que aún no había cerrado? Ese fue el origen de los dos bugs más grandes encontrados en esta sesión (ver "beneficio de la duda en la vela de entrada" y "sesgo de mínimo de la vela" más abajo).
 
 ---
@@ -659,3 +665,70 @@ Los resultados de $152.338 (o superiores) mencionados en secciones anteriores de
 - Re-ejecutar el grid search de TP1/TP2 con el motor causal (los grids documentados arriba usaban el motor con el sesgo).
 - Reconciliar la discrepancia del grid de TP1 (sube monótono hasta ~3,2R en mi motor vs. "1,8R óptimo" documentado por la otra sesión) contra el motor de referencia JS, ahora que el motor Python está en su versión más confiable.
 - Push a GitHub (`elabel17/mnq-ict-smc-bot`) de: `engine.py` corregido, este documento actualizado, y una nota indicando que el commit anterior (`9d8f0b6`) refleja la versión pre-fix.
+
+## ✅ SESIÓN 2026-09-09 — cuenta de fondeo, doble sesión, sesgo de 1H, diagnóstico de pérdidas
+
+Contexto: el usuario tiene una cuenta de fondeo con **pérdida máxima $1.900 y objetivo de ganancia $3.000**. Todo el análisis de esta sección se hizo con esa restricción como criterio principal, salvo donde se indica "sin límite de cuenta" explícitamente. Metodología usada en TODO: holdout limpio 70% in-sample (para elegir parámetros) / 30% out-of-sample (nunca tocado, usado solo para confirmar) — cualquier hallazgo que no se sostuviera ahí se descartó o se reportó como no confirmado.
+
+### 1. Con el límite de cuenta: solo 1 contrato cabe bajo $1.900 (antes del filtro de 1H)
+
+Con la configuración de 3 contratos (2 en TP1 + 1 corriendo), el drawdown histórico es $3.649-3.872 — **excede el límite por el doble**. Se probaron todos los repartos de 1 a 5 contratos: únicamente 1 contrato mantiene el DD bajo $1.900. El usuario decidió explícitamente **no operar con 1 contrato** ("no es negociable, son 3") y aceptó el riesgo de exceder el límite históricamente, con el argumento de que una racha así es difícil de repetir. Se le señaló que hay 5 rachas de 6+ pérdidas en el histórico (la peor: 9 pérdidas, $2.125 en un mes) — no es un evento de una sola vez.
+
+### 2. TP1: estadísticamente lo más rentable es NO cerrar nada ahí
+
+Se probaron los 4 repartos posibles de 3 contratos (3+0, 2+1, 1+2, 0+3 entre TP1/TP2). Resultado: **0 en TP1, 3 corriendo a TP2 es superior en TODOS los indicadores** (net, PF, winrate) — no es "más riesgo por más retorno", el riesgo de entrada es el mismo, solo cambia cuánto se captura del lado ganador. Desde este hallazgo, todos los backtests posteriores usan este reparto (0, 3) o equivalente (0, 4) con 4 contratos.
+
+### 3. Optimización de sesión — mañana 03:00-11:00 NY, noche 18:00-00:00 NY
+
+Se encontró que la ventana de sesión actual del script (18:00-11:00 NY completa) mezclaba horas muy dispares en calidad: 09:00-10:00 NY genera el 67% de toda la ganancia, mientras que 01:00 y 21:00 NY tienen resultado negativo en promedio. Se probaron múltiples recortes y se determinó (validado OOS):
+
+- **Mañana: 03:00-11:00 NY**, con TP2=6.0R, BE trigger=1.2R, BE lock=1.0R (parámetros de detección sin cambios).
+- **Noche: 18:00-00:00 NY**, con parámetros de detección RECALIBRADOS (ver punto 4) — la ventana completa nocturna se mantiene, recortarla más (después de las 8pm o 10pm) empeora los resultados o no se sostiene fuera de muestra; contraintuitivamente las horas de apertura (18:00-19:00) son las más fuertes, no las últimas.
+- Horas 11:00-18:00 y 00:00-03:00: sin operar, no mostraron edge.
+- Se implementó soporte para regímenes de parámetros completamente independientes por sesión (`select_trades_multi` en `claude_engine2.py`, expandido en `claude_session_config.py`), replicando la metodología de correr manaña y noche como dos backtests separados que luego se combinan.
+
+### 4. La sesión nocturna SÍ tiene una configuración rentable — solo necesitaba recalibración, no solo ajustar TP/BE
+
+Diagnóstico inicial: volumen nocturno (18:00-08:00 NY) es 4-10x menor que en la mañana (2.700-12.000 vs 25.000-55.000 contratos/vela de 15m), lo que hace que las señales de "desplazamiento" sean más ruidosas. La mejora NO vino de tocar solo TP/BE (eso daba PF~1.3, apenas rentable) sino de recalibrar los filtros de detección al carácter de vela más chico de la noche:
+
+| Parámetro | Manaña (sin cambio) | Noche (recalibrado) |
+|---|---|---|
+| LIQ_ACCUM_BARS | 6 | **15** (mucho más permisivo) |
+| LIQ_TOLERANCE_PTS | 4.0 | **2.0** (más estricto) |
+| ENTRY_BUFFER_PTS | 12.0 | **8.0** |
+| SL_BUFFER_PTS | 2.0 | **1.0** |
+| TP2 | 6.0R | **7.0R** |
+| BE trigger | 1.2R | **0.8R** |
+| BE lock | 1.0R | **0.3R** |
+
+Impacto (ventana 18:00-00:00 NY, histórico completo): net $8.426→**$22.241** (x2.6), PF 1.30→**1.84**, winrate 52.6%→**64.4%**. Confirmado fuera de muestra (avg/trade IN=$80.76 vs OOS=$78.53, prácticamente idéntico). Se probó bajar el TP2 nocturno (hipótesis del usuario) — **empeora consistentemente en todo el rango probado (1.8R a 10R)**, 7.0R sigue siendo el óptimo.
+
+### 5. Hallazgo mayor: filtro de sesgo de 1H (nunca implementado pese al nombre del script)
+
+El script real se llama *"ICT 1H Liquidity Bias + 15M OB Entry"* pero el código nunca implementaba ningún filtro de sesgo de tendencia de 1H — solo detección pura en 15m. Se agregó un filtro simple (SMA de 10 velas de 1H: solo largos si el precio está sobre la media, solo cortos si está debajo), calculado con `request.security` sin lookahead. Validado con holdout limpio en ambas sesiones por separado:
+
+| | Sin filtro 1H | Con filtro 1H |
+|---|---|---|
+| Trades (mañana+noche) | 1.505 | 730 |
+| Net (histórico completo) | $144.180 | $121.696 (-16%) |
+| Profit Factor | 1.93 | **3.08** |
+| Winrate | 58.1% | **67.9%** |
+| Max Drawdown | $3.074 | **$1.598** (-48%) |
+
+Este filtro resultó ser, con 3 contratos, la configuración que finalmente cabe bajo el límite de $1.900 de la cuenta (antes ninguna combinación de TP/BE lo lograba salvo con 1 contrato).
+
+### 6. Diagnóstico riguroso de pérdidas totales (FULL_LOSS)
+
+Se extendió el motor (`claude_engine4.py`) para capturar metadatos por operación (ancho de zona, profundidad de entrada en el margen, ratio de desplazamiento, racha de liquidez, volumen de la vela señal/origen, edad de la zona). **Ninguno de estos factores, individualmente, distingue una pérdida total del resto** — la tasa se mantiene 35-45% en todos los cuartiles de cada variable. Tampoco hay autocorrelación entre pérdidas consecutivas, ni diferencia relevante por dirección (long/short) o día de la semana. Esto llevó a la búsqueda del filtro de sesgo de 1H (punto 5), que sí demostró ser efectivo — no filtrando por características de la zona, sino por alineación con la tendencia de mayor marco temporal.
+
+Se probó además un tope de riesgo máximo por operación ($550, equivalente a 68.75pts con 4 contratos): **descartado** — las operaciones de riesgo alto en realidad ganan MÁS seguido que el promedio (70.2% vs 67.9%), limitar el riesgo elimina ganancia ($36.820 menos, -22.7%) sin filtrar malas operaciones.
+
+### 7. Decisión de 4 contratos y análisis de drawdown por período
+
+Con el filtro de 1H, 4 contratos da DD $2.130 (excede $1.900 por ~$230); 3 contratos da DD $1.598 (cabe, con margen $302). El usuario preguntó si los episodios de drawdown >$1.900 con 4 contratos se concentraban en algún período del año (hipótesis: sep-dic). Resultado: solo 3 episodios en 6.27 años (2021-03, 2023-06, 2023-08), ninguno en sep-dic — **pero con una muestra de solo 3 eventos, esto no es evidencia estadística de un patrón estacional real**, solo indica que el evento es raro en general (~1 vez cada 2 años). El usuario decidió proceder con 4 contratos aceptando ese riesgo, con esta salvedad explícita comunicada.
+
+### 8. Script real actualizado — ⚠️ ver aviso de identidad de script arriba
+
+Se aplicó al script real de TradingView: doble sesión (mañana/noche con regímenes independientes, incluido estado de posición completamente separado por sesión — no comparten "operación abierta"), filtro de sesgo de 1H, y **un fix de causalidad adicional encontrado en el proceso**: el script real NUNCA había tenido el fix de "no gestionar SL/TP en la misma vela de la entrada" que sí lleva el motor Python desde 2026-09-08 — se corrigió por primera vez aquí. Compilado sin errores y verificado corriendo en vivo (capturas de pantalla confirmando etiquetas `[MANANA]`/`[NOCHE]`).
+
+**Pendiente para el usuario:** revisar manualmente 8 operaciones de muestra (5 pérdidas totales + 3 ganadoras, con fecha/hora/precio exactos) para aportar contexto visual/manual que el diagnóstico sistemático no pudo capturar, dado que el usuario reporta experiencia manual de mayor rentabilidad nocturna que la que refleja el backtest.

@@ -1,0 +1,456 @@
+//@version=6
+strategy("ICT 15M OB Entry v18 - dual-sesion + sesgo 1H", overlay=true,
+     initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
+     calc_on_every_tick=false, process_orders_on_close=true,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================
+// v18 — DOS REGIMENES DE SESION + SESGO DE 1H. Cambios 2026-09-09:
+//
+// 1) Se limita la operativa a DOS ventanas horarias (NY), cada una con su
+//    propio conjunto de parametros de deteccion y de gestion (TP2/BE):
+//      - MANANA 03:00-11:00 NY: parametros identicos al script anterior
+//        (session default). Es donde ya se concentraba la mayor parte
+//        del volumen y la calidad de las senales.
+//      - NOCHE 18:00-00:00 NY: parametros RECALIBRADOS especificamente
+//        para el volumen y rango mas chico de esa franja (ver inputs
+//        agrupados "Noche"). Sin recalibrar, esta franja rendia PF~1.3;
+//        recalibrada, PF~1.8-2.0, validado fuera de muestra.
+//    Las horas 11:00-18:00 y 00:00-03:00 quedan SIN operar -- no
+//    mostraron edge suficiente en el analisis historico.
+//
+// 2) Se agrega el filtro de SESGO DE 1 HORA que el propio nombre del
+//    script prometia ("1H Liquidity Bias") pero que nunca estaba
+//    implementado en el codigo: solo se toman largos si el precio de 1H
+//    esta sobre su propia SMA, y solo cortos si esta debajo. Esto
+//    redujo las perdidas totales de ~42% a ~32% de las operaciones y
+//    subio el Profit Factor combinado de 1.93 a 3.08 en el backtest
+//    historico (6.27 anios), validado fuera de muestra en ambas
+//    sesiones por separado.
+//
+// 3) Los repartos de TP1 fueron eliminados de la logica de EJECUCION:
+//    el analisis estadistico (grid completo, validado con holdout
+//    70/30) mostro que dejar correr el 100% de la posicion hasta TP2 es
+//    mas rentable que cerrar parcial en TP1 en TODOS los escenarios
+//    probados. TP1 se conserva solo como referencia visual/informativa
+//    en las etiquetas, no cierra contratos.
+//
+// IMPORTANTE: este script sigue sin colocar ordenes reales
+// (no llama strategy.entry/exit) -- es un generador de senales, igual
+// que las versiones anteriores. El tamano de posicion (numero de
+// contratos) se decide manualmente o en la automatizacion, no aqui.
+// ============================================================
+
+startDate      = input.time(timestamp("2020-01-01 00:00 -0500"), "Backtest start")
+endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
+
+// ---------------- Parametros comunes de deteccion ----------------
+dispLen        = input.int(20, "Barras para el rango promedio", minval=5, maxval=60, group="Deteccion (comun)")
+dispMult       = input.float(2.5, "Umbral de desplazamiento (x rango promedio)", minval=1.2, maxval=6.0, group="Deteccion (comun)")
+dispCloseFrac  = input.float(0.6, "Fracción mínima de cierre direccional", minval=0.3, maxval=1.0, group="Deteccion (comun)")
+obScanBars     = input.int(10, "Barras hacia atrás para la vela de origen", minval=3, maxval=30, group="Deteccion (comun)")
+liqCheckBars   = input.int(12, "Ventana para revisar liquidez detrás del OB", minval=3, maxval=40, group="Deteccion (comun)")
+zoneMaxAge     = input.int(300, "Velas que una zona sigue viva sin ser tocada", minval=20, maxval=2000, group="Deteccion (comun)")
+maxZones       = input.int(40, "Máximo de zonas vivas por regimen (protección)", minval=4, maxval=100, group="Deteccion (comun)")
+rr1            = input.float(1.8, "TP1 (solo referencia visual, no cierra contratos)", group="Deteccion (comun)")
+useRiskCap     = input.bool(true, "Descartar señal si el stop supera el tope", group="Deteccion (comun)")
+maxRiskPts     = input.float(100.0, "Tope máximo de riesgo por operación (pts)", minval=10, group="Deteccion (comun)")
+
+// ---------------- Sesgo de 1H ----------------
+use1hBias      = input.bool(true, "Aplicar filtro de sesgo de 1H", group="Sesgo 1H")
+biasSmaLen     = input.int(10, "Largo de la SMA de 1H para el sesgo", minval=3, maxval=50, group="Sesgo 1H")
+
+// ---------------- Regimen MANANA (03:00-11:00 NY) ----------------
+mLiqTolerancePts = input.float(4.0, "[Mañana] Tolerancia liquidez (pts)", minval=0, group="Mañana 03:00-11:00 NY")
+mLiqAccumBars    = input.int(6, "[Mañana] Racha que invalida liquidez", minval=2, maxval=30, group="Mañana 03:00-11:00 NY")
+mSlBufferPts     = input.float(2.0, "[Mañana] Buffer SL (pts)", minval=0, group="Mañana 03:00-11:00 NY")
+mEntryBufferPts  = input.float(12.0, "[Mañana] Margen de entrada (pts)", minval=0, group="Mañana 03:00-11:00 NY")
+mRR2             = input.float(6.0, "[Mañana] TP2 (múltiplo de R)", group="Mañana 03:00-11:00 NY")
+mBeTriggerR      = input.float(1.2, "[Mañana] Gatillo de BE (múltiplo de R)", minval=0, maxval=3, group="Mañana 03:00-11:00 NY")
+mLockR           = input.float(1.0, "[Mañana] Ganancia asegurada en BE (múltiplo de R)", minval=0, maxval=3, group="Mañana 03:00-11:00 NY")
+
+// ---------------- Regimen NOCHE (18:00-00:00 NY) ----------------
+nLiqTolerancePts = input.float(2.0, "[Noche] Tolerancia liquidez (pts)", minval=0, group="Noche 18:00-00:00 NY")
+nLiqAccumBars    = input.int(15, "[Noche] Racha que invalida liquidez", minval=2, maxval=30, group="Noche 18:00-00:00 NY")
+nSlBufferPts     = input.float(1.0, "[Noche] Buffer SL (pts)", minval=0, group="Noche 18:00-00:00 NY")
+nEntryBufferPts  = input.float(8.0, "[Noche] Margen de entrada (pts)", minval=0, group="Noche 18:00-00:00 NY")
+nRR2             = input.float(7.0, "[Noche] TP2 (múltiplo de R)", group="Noche 18:00-00:00 NY")
+nBeTriggerR      = input.float(0.8, "[Noche] Gatillo de BE (múltiplo de R)", minval=0, maxval=3, group="Noche 18:00-00:00 NY")
+nLockR           = input.float(0.3, "[Noche] Ganancia asegurada en BE (múltiplo de R)", minval=0, maxval=3, group="Noche 18:00-00:00 NY")
+
+// ---------------- Visual ----------------
+showZones      = input.bool(true, "Dibujar las zonas OB vivas", group="Visual")
+showWideZone   = input.bool(true, "Dibujar la zona ampliada (OB + margen de entrada)", group="Visual")
+showLockZone   = input.bool(true, "Dibujar la caja de ganancia asegurada al activarse", group="Visual")
+
+inDateRange = time >= startDate and time <= endDate
+nyMinOfDay  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+inMorning   = nyMinOfDay >= 180 and nyMinOfDay < 660    // 03:00-11:00 NY
+inNight     = nyMinOfDay >= 1080                          // 18:00-00:00 NY (cruza medianoche)
+
+// ---------------- Sesgo de 1H (SMA de 1H nativa, sin lookahead) ----------------
+h1Bias = request.security(syminfo.tickerid, "60", math.sign(close - ta.sma(close, biasSmaLen)), lookahead=barmerge.lookahead_off)
+
+type Zone
+    int   dir
+    float top
+    float bot
+    bool  cleared
+    int   born
+    box   bx
+    box   bxWide
+
+var array<Zone> zonesM = array.new<Zone>()   // zonas detectadas con parametros de MANANA
+var array<Zone> zonesN = array.new<Zone>()   // zonas detectadas con parametros de NOCHE
+
+avgRange = ta.sma(high - low, dispLen)
+rng      = high - low
+isDisp   = rng >= dispMult * avgRange[1]
+bullDisp = isDisp and close > open and (close - low) >= dispCloseFrac * rng
+bearDisp = isDisp and close < open and (high - close) >= dispCloseFrac * rng
+
+// ---------------- 1) Formar zonas nuevas (una pasada por cada regimen) ----------------
+formZones(bool isBull, bool isBear, float liqTolPts, int liqAccBars, array<Zone> zoneArr, bool drawIt, float entryBufPts) =>
+    if isBull
+        idx = -1
+        for i = 1 to obScanBars
+            if close[i] < open[i]
+                idx := i
+                break
+        if idx != -1
+            candBot   = low[idx]
+            maxStreak = 0
+            curStreak = 0
+            for j = idx + 1 to idx + liqCheckBars
+                if low[j] <= candBot + liqTolPts
+                    curStreak += 1
+                    maxStreak := math.max(maxStreak, curStreak)
+                else
+                    curStreak := 0
+            if maxStreak < liqAccBars
+                nb = (drawIt and showZones) ? box.new(bar_index - idx, high[idx], bar_index, candBot,
+                     border_color=color.new(color.green, 20), bgcolor=color.new(color.green, 88), border_width=2) : na
+                nw = (drawIt and showWideZone) ? box.new(bar_index - idx, high[idx] + entryBufPts, bar_index, candBot,
+                     border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 95),
+                     border_width=1, border_style=line.style_dashed) : na
+                array.push(zoneArr, Zone.new(1, high[idx], candBot, false, bar_index, nb, nw))
+    if isBear
+        idx2 = -1
+        for i = 1 to obScanBars
+            if close[i] > open[i]
+                idx2 := i
+                break
+        if idx2 != -1
+            candTop    = high[idx2]
+            maxStreak2 = 0
+            curStreak2 = 0
+            for j = idx2 + 1 to idx2 + liqCheckBars
+                if high[j] >= candTop - liqTolPts
+                    curStreak2 += 1
+                    maxStreak2 := math.max(maxStreak2, curStreak2)
+                else
+                    curStreak2 := 0
+            if maxStreak2 < liqAccBars
+                nb2 = (drawIt and showZones) ? box.new(bar_index - idx2, candTop, bar_index, low[idx2],
+                     border_color=color.new(color.red, 20), bgcolor=color.new(color.red, 88), border_width=2) : na
+                nw2 = (drawIt and showWideZone) ? box.new(bar_index - idx2, candTop, bar_index, low[idx2] - entryBufPts,
+                     border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 95),
+                     border_width=1, border_style=line.style_dashed) : na
+                array.push(zoneArr, Zone.new(-1, candTop, low[idx2], false, bar_index, nb2, nw2))
+
+formZones(bullDisp, bearDisp, mLiqTolerancePts, mLiqAccumBars, zonesM, true, mEntryBufferPts)
+formZones(bullDisp, bearDisp, nLiqTolerancePts, nLiqAccumBars, zonesN, false, nEntryBufferPts)
+
+while array.size(zonesM) > maxZones
+    zOld = array.shift(zonesM)
+    box.delete(zOld.bx)
+    box.delete(zOld.bxWide)
+while array.size(zonesN) > maxZones
+    zOld2 = array.shift(zonesN)
+    box.delete(zOld2.bx)
+    box.delete(zOld2.bxWide)
+
+// ---------------- 2) Actualizar 'cleared' ----------------
+updateCleared(array<Zone> zoneArr) =>
+    if array.size(zoneArr) > 0
+        for i = 0 to array.size(zoneArr) - 1
+            z = array.get(zoneArr, i)
+            if z.born != bar_index and not z.cleared
+                if z.dir == 1 and low > z.top
+                    z.cleared := true
+                else if z.dir == -1 and high < z.bot
+                    z.cleared := true
+updateCleared(zonesM)
+updateCleared(zonesN)
+
+// ---------------- 3) Estado de la operación -- DOS BLOQUES INDEPENDIENTES ----------------
+// IMPORTANTE: manana y noche mantienen su propio estado de posicion por
+// separado (cada una puede tener una operacion abierta sin bloquear a la
+// otra). Esto replica EXACTAMENTE la metodologia validada en el analisis
+// (Python corrio manana y noche como dos backtests independientes sobre
+// el mismo historico y luego se sumaron los resultados) -- no es una
+// aproximacion, es la misma logica.
+var bool  tradeOpenM  = false
+var int   dirM        = 0
+var float entryPriceM = na
+var float activeSLM   = na
+var float riskPtsM    = na
+var bool  beMovedM    = false
+var int   entryBarM   = na
+
+var bool  tradeOpenN  = false
+var int   dirN        = 0
+var float entryPriceN = na
+var float activeSLN   = na
+var float riskPtsN    = na
+var bool  beMovedN    = false
+var int   entryBarN   = na
+
+canEnterMorning = inMorning and inDateRange and not tradeOpenM
+canEnterNight   = inNight and inDateRange and not tradeOpenN
+
+// ---------------- 4) Buscar candidata en un regimen dado ----------------
+findCandidate(array<Zone> zoneArr, float entryBufPts, float slBufPts) =>
+    float ce = na
+    float cs = na
+    float cr = na
+    int   cd = 0
+    int   cb = -1
+    if array.size(zoneArr) > 0
+        for i = 0 to array.size(zoneArr) - 1
+            z = array.get(zoneArr, i)
+            if z.born != bar_index and z.cleared and (bar_index - z.born) <= zoneMaxAge
+                if z.dir == 1 and low <= z.top + entryBufPts and low >= z.bot
+                    if not use1hBias or h1Bias > 0
+                        e = low <= z.top ? z.top : z.top + entryBufPts
+                        x = z.bot - slBufPts
+                        r = e - x
+                        if r > 0 and (not useRiskCap or r <= maxRiskPts) and z.born > cb
+                            ce := e
+                            cs := x
+                            cr := r
+                            cd := 1
+                            cb := z.born
+                if z.dir == -1 and high >= z.bot - entryBufPts and high <= z.top
+                    if not use1hBias or h1Bias < 0
+                        e2 = high >= z.bot ? z.bot : z.bot - entryBufPts
+                        x2 = z.top + slBufPts
+                        r2 = x2 - e2
+                        if r2 > 0 and (not useRiskCap or r2 <= maxRiskPts) and z.born > cb
+                            ce := e2
+                            cs := x2
+                            cr := r2
+                            cd := -1
+                            cb := z.born
+    [ce, cs, cr, cd, cb]
+
+float candEntryM = na
+float candSLM = na
+float candRiskM = na
+int   candDirM = 0
+int   candBornM = -1
+if canEnterMorning
+    [ceM, csM, crM, cdM, cbM] = findCandidate(zonesM, mEntryBufferPts, mSlBufferPts)
+    candEntryM := ceM
+    candSLM := csM
+    candRiskM := crM
+    candDirM := cdM
+    candBornM := cbM
+
+float candEntryN = na
+float candSLN = na
+float candRiskN = na
+int   candDirN = 0
+int   candBornN = -1
+if canEnterNight
+    [ceN, csN, crN, cdN, cbN] = findCandidate(zonesN, nEntryBufferPts, nSlBufferPts)
+    candEntryN := ceN
+    candSLN := csN
+    candRiskN := crN
+    candDirN := cdN
+    candBornN := cbN
+
+// ---------------- 5) Retirar zonas caducadas o consumidas ----------------
+pruneZones(array<Zone> zoneArr) =>
+    if array.size(zoneArr) > 0
+        for i = array.size(zoneArr) - 1 to 0
+            z = array.get(zoneArr, i)
+            expired  = (bar_index - z.born) > zoneMaxAge
+            consumed = z.born != bar_index and z.cleared and ((z.dir == 1 and low <= z.top) or (z.dir == -1 and high >= z.bot))
+            if expired or consumed
+                box.delete(z.bx)
+                box.delete(z.bxWide)
+                array.remove(zoneArr, i)
+                int _d1 = 0
+            else
+                if not na(z.bx)
+                    box.set_right(z.bx, bar_index)
+                if not na(z.bxWide)
+                    box.set_right(z.bxWide, bar_index)
+                int _d2 = 0
+pruneZones(zonesM)
+pruneZones(zonesN)
+
+// ---------------- 6) Entrada -- MANANA ----------------
+if canEnterMorning and candDirM != 0
+    entryPriceM := candEntryM
+    activeSLM   := candSLM
+    riskPtsM    := candRiskM
+    beMovedM    := false
+    tradeOpenM  := true
+    dirM        := candDirM
+    entryBarM   := bar_index
+    lockPx = candDirM == 1 ? candEntryM + candRiskM * mLockR : candEntryM - candRiskM * mLockR
+    tp1Px  = candDirM == 1 ? candEntryM + candRiskM * rr1    : candEntryM - candRiskM * rr1
+    tp2Px  = candDirM == 1 ? candEntryM + candRiskM * mRR2   : candEntryM - candRiskM * mRR2
+    txt = "[MANANA] " + (candDirM == 1 ? "LONG " : "SHORT ") + str.tostring(candEntryM, "#.##") +
+      "\nSL " + str.tostring(candSLM, "#.##") +
+      "\nAsegura +" + str.tostring(mLockR, "#.##") + "R @ " + str.tostring(lockPx, "#.##") +
+      "\nTP1(ref) " + str.tostring(tp1Px, "#.##") +
+      "\nTP2 " + str.tostring(tp2Px, "#.##")
+    if candDirM == 1
+        label.new(bar_index, low, txt, style=label.style_label_up, color=color.green, textcolor=color.white, yloc=yloc.belowbar, size=size.small)
+    else
+        label.new(bar_index, high, txt, style=label.style_label_down, color=color.red, textcolor=color.white, yloc=yloc.abovebar, size=size.small)
+
+// ---------------- 6b) Entrada -- NOCHE ----------------
+if canEnterNight and candDirN != 0
+    entryPriceN := candEntryN
+    activeSLN   := candSLN
+    riskPtsN    := candRiskN
+    beMovedN    := false
+    tradeOpenN  := true
+    dirN        := candDirN
+    entryBarN   := bar_index
+    lockPxN = candDirN == 1 ? candEntryN + candRiskN * nLockR : candEntryN - candRiskN * nLockR
+    tp1PxN  = candDirN == 1 ? candEntryN + candRiskN * rr1    : candEntryN - candRiskN * rr1
+    tp2PxN  = candDirN == 1 ? candEntryN + candRiskN * nRR2   : candEntryN - candRiskN * nRR2
+    txtN = "[NOCHE] " + (candDirN == 1 ? "LONG " : "SHORT ") + str.tostring(candEntryN, "#.##") +
+      "\nSL " + str.tostring(candSLN, "#.##") +
+      "\nAsegura +" + str.tostring(nLockR, "#.##") + "R @ " + str.tostring(lockPxN, "#.##") +
+      "\nTP1(ref) " + str.tostring(tp1PxN, "#.##") +
+      "\nTP2 " + str.tostring(tp2PxN, "#.##")
+    if candDirN == 1
+        label.new(bar_index, low, txtN, style=label.style_label_up, color=color.blue, textcolor=color.white, yloc=yloc.belowbar, size=size.small)
+    else
+        label.new(bar_index, high, txtN, style=label.style_label_down, color=color.orange, textcolor=color.white, yloc=yloc.abovebar, size=size.small)
+
+// ---------------- 7) Gestión -- MANANA ----------------
+// FIX: nunca gestionar (SL/TP2/BE) en la MISMA vela en que se abrio la
+// operacion -- evita el "beneficio de la duda" de usar el low (para
+// entrar) y el high (para el TP) de una misma vela sin conocer el orden
+// real intrabar. Este fix ya existia en el motor Python (engine.py)
+// desde el 2026-09-08 pero NUNCA se habia portado al script real -- se
+// corrige aqui por primera vez.
+justEnteredM = tradeOpenM and not na(entryBarM) and entryBarM == bar_index
+if tradeOpenM and dirM == 1 and not justEnteredM
+    tp2m = entryPriceM + riskPtsM * mRR2
+    hitSLm = low <= activeSLM
+    hitTP2m = high >= tp2m
+    reachedRm = (high - entryPriceM) / riskPtsM
+    if hitSLm
+        label.new(bar_index, low, beMovedM ? "= [M] Cerrado asegurando +" + str.tostring(mLockR, "#.##") + "R" : "✗ [M] PÉRDIDA TOTAL",
+             style=label.style_label_up, color=beMovedM ? color.new(color.gray, 20) : color.new(color.red, 0), textcolor=color.white, size=size.small)
+        tradeOpenM := false
+    else if hitTP2m
+        label.new(bar_index, high, "✓✓ [M] TP2 alcanzado", style=label.style_label_down, color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpenM := false
+    else if mBeTriggerR > 0 and not beMovedM and reachedRm >= mBeTriggerR
+        beMovedM := true
+        activeSLM := entryPriceM + riskPtsM * mLockR
+        label.new(bar_index, high, "→ [M] Asegura +" + str.tostring(mLockR, "#.##") + "R", style=label.style_label_down, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+if tradeOpenM and dirM == -1 and not justEnteredM
+    tp2m2 = entryPriceM - riskPtsM * mRR2
+    hitSLm2 = high >= activeSLM
+    hitTP2m2 = low <= tp2m2
+    reachedRm2 = (entryPriceM - low) / riskPtsM
+    if hitSLm2
+        label.new(bar_index, high, beMovedM ? "= [M] Cerrado asegurando +" + str.tostring(mLockR, "#.##") + "R" : "✗ [M] PÉRDIDA TOTAL",
+             style=label.style_label_down, color=beMovedM ? color.new(color.gray, 20) : color.new(color.red, 0), textcolor=color.white, size=size.small)
+        tradeOpenM := false
+    else if hitTP2m2
+        label.new(bar_index, low, "✓✓ [M] TP2 alcanzado", style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpenM := false
+    else if mBeTriggerR > 0 and not beMovedM and reachedRm2 >= mBeTriggerR
+        beMovedM := true
+        activeSLM := entryPriceM - riskPtsM * mLockR
+        label.new(bar_index, low, "→ [M] Asegura +" + str.tostring(mLockR, "#.##") + "R", style=label.style_label_up, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+// ---------------- 7b) Gestión -- NOCHE ----------------
+justEnteredN = tradeOpenN and not na(entryBarN) and entryBarN == bar_index
+if tradeOpenN and dirN == 1 and not justEnteredN
+    tp2n = entryPriceN + riskPtsN * nRR2
+    hitSLn = low <= activeSLN
+    hitTP2n = high >= tp2n
+    reachedRn = (high - entryPriceN) / riskPtsN
+    if hitSLn
+        label.new(bar_index, low, beMovedN ? "= [N] Cerrado asegurando +" + str.tostring(nLockR, "#.##") + "R" : "✗ [N] PÉRDIDA TOTAL",
+             style=label.style_label_up, color=beMovedN ? color.new(color.gray, 20) : color.new(color.red, 0), textcolor=color.white, size=size.small)
+        tradeOpenN := false
+    else if hitTP2n
+        label.new(bar_index, high, "✓✓ [N] TP2 alcanzado", style=label.style_label_down, color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpenN := false
+    else if nBeTriggerR > 0 and not beMovedN and reachedRn >= nBeTriggerR
+        beMovedN := true
+        activeSLN := entryPriceN + riskPtsN * nLockR
+        label.new(bar_index, high, "→ [N] Asegura +" + str.tostring(nLockR, "#.##") + "R", style=label.style_label_down, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+if tradeOpenN and dirN == -1 and not justEnteredN
+    tp2n2 = entryPriceN - riskPtsN * nRR2
+    hitSLn2 = high >= activeSLN
+    hitTP2n2 = low <= tp2n2
+    reachedRn2 = (entryPriceN - low) / riskPtsN
+    if hitSLn2
+        label.new(bar_index, high, beMovedN ? "= [N] Cerrado asegurando +" + str.tostring(nLockR, "#.##") + "R" : "✗ [N] PÉRDIDA TOTAL",
+             style=label.style_label_down, color=beMovedN ? color.new(color.gray, 20) : color.new(color.red, 0), textcolor=color.white, size=size.small)
+        tradeOpenN := false
+    else if hitTP2n2
+        label.new(bar_index, low, "✓✓ [N] TP2 alcanzado", style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpenN := false
+    else if nBeTriggerR > 0 and not beMovedN and reachedRn2 >= nBeTriggerR
+        beMovedN := true
+        activeSLN := entryPriceN - riskPtsN * nLockR
+        label.new(bar_index, low, "→ [N] Asegura +" + str.tostring(nLockR, "#.##") + "R", style=label.style_label_up, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+// ---------------- 8) Cajas de ganancia asegurada (una por regimen) ----------------
+var box lockZoneBoxM = na
+var box lockZoneBoxN = na
+if showLockZone
+    if tradeOpenM and beMovedM and not na(activeSLM) and not na(entryPriceM)
+        lockTopM = math.max(entryPriceM, activeSLM)
+        lockBotM = math.min(entryPriceM, activeSLM)
+        if na(lockZoneBoxM)
+            lockZoneBoxM := box.new(bar_index, lockTopM, bar_index, lockBotM, border_color=color.new(color.blue, 30), bgcolor=color.new(color.blue, 80), border_width=1)
+        else
+            box.set_right(lockZoneBoxM, bar_index)
+            box.set_top(lockZoneBoxM, lockTopM)
+            box.set_bottom(lockZoneBoxM, lockBotM)
+    else if not tradeOpenM and not na(lockZoneBoxM)
+        lockZoneBoxM := na
+
+    if tradeOpenN and beMovedN and not na(activeSLN) and not na(entryPriceN)
+        lockTopN = math.max(entryPriceN, activeSLN)
+        lockBotN = math.min(entryPriceN, activeSLN)
+        if na(lockZoneBoxN)
+            lockZoneBoxN := box.new(bar_index, lockTopN, bar_index, lockBotN, border_color=color.new(color.purple, 30), bgcolor=color.new(color.purple, 80), border_width=1)
+        else
+            box.set_right(lockZoneBoxN, bar_index)
+            box.set_top(lockZoneBoxN, lockTopN)
+            box.set_bottom(lockZoneBoxN, lockBotN)
+    else if not tradeOpenN and not na(lockZoneBoxN)
+        lockZoneBoxN := na
+
+// ---------------- 9) Alertas ----------------
+alertcondition(bullDisp, title="Nueva zona LONG detectada", message="{{ticker}}: nueva zona de COMPRA formada")
+alertcondition(bearDisp, title="Nueva zona SHORT detectada", message="{{ticker}}: nueva zona de VENTA formada")
+
+// ---------------- 10) Diagnóstico ----------------
+plot(array.size(zonesM), "Zonas vivas (manana)", display=display.data_window)
+plot(array.size(zonesN), "Zonas vivas (noche)", display=display.data_window)
+plot(tradeOpenM ? 1 : 0, "Operacion abierta (manana)", display=display.data_window)
+plot(tradeOpenN ? 1 : 0, "Operacion abierta (noche)", display=display.data_window)
+plot(h1Bias, "Sesgo 1H (+1 alcista/-1 bajista)", display=display.data_window)
+
+bgcolor(inMorning and inDateRange ? color.new(color.blue, 92) : inNight and inDateRange ? color.new(color.purple, 92) : na)
