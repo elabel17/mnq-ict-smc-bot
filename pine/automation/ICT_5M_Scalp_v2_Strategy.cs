@@ -485,6 +485,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return expired || consumed;
             });
 
+            // ---------- red de seguridad: exceso de contratos ----------
+            if (Position.Quantity > Qty)
+            {
+                Log("EXCESO_CONTRATOS", Position.MarketPosition.ToString(), Close[0], 0, 0, 0,
+                    "posicion de " + Position.Quantity.ToString(INV) + " con Qty=" + Qty.ToString(INV));
+                CancelPending();
+                if (Position.MarketPosition == MarketPosition.Long) ExitLong("EXCESO", "");
+                else                                                ExitShort("EXCESO", "");
+                return;
+            }
+
             // ---------- red de seguridad ----------
             // Posicion abierta que la estrategia no reconoce = estado inconsistente.
             // Sin salidas vivas se quedaria colgada para siempre; se cierra a mercado.
@@ -518,15 +529,23 @@ namespace NinjaTrader.NinjaScript.Strategies
                 h1Bias = c1 > s1 ? 1 : (c1 < s1 ? -1 : 0);
             }
 
-            // ---------- una limite descansando en CADA zona elegible ----------
-            var vivas = new HashSet<long>();
+            // ---------- UNA limite, en la zona mas cercana al precio ----------
+            // Descansar una orden en cada zona no es viable: en el 11% de las
+            // entradas de la referencia hay 2 o mas niveles distintos tocados en
+            // la misma vela, y todas esas limites se llenarian a la vez. En el
+            // replay del 3 y 4 de septiembre la posicion llego a 8 contratos.
+            // La zona mas cercana es la que el precio tocaria primero, que es lo
+            // mas parecido a la referencia que se puede ejecutar de verdad.
+            Zone mejor = null;
+            double mejorDist = double.MaxValue, mejorLvl = 0, mejorStop = 0;
+            int mejorDir = 0;
+
             foreach (var z in zones)
             {
                 if (z.Born == CurrentBar || !z.Cleared) continue;
                 if ((CurrentBar - z.Born) > ZoneMaxAge) continue;
 
-                int    d;
-                double lvl, stp;
+                int d; double lvl, stp;
                 if (z.Dir == 1)
                 {
                     if (Use1hBias && h1Bias <= 0) continue;
@@ -547,28 +566,39 @@ namespace NinjaTrader.NinjaScript.Strategies
                 double r = Math.Abs(lvl - stp);
                 if (r <= 0 || (UseRiskCap && r > MaxRiskPts)) continue;
 
-                double lim = Instrument.MasterInstrument.RoundToTickSize(lvl);
-                vivas.Add(z.Id);
-
-                Pend pz;
-                bool esNueva = !pend.TryGetValue(z.Id, out pz);
-                if (esNueva) { pz = new Pend(); pend[z.Id] = pz; }
-                bool cambio = esNueva || pz.Lvl != lim || pz.Dir != d;
-
-                pz.Dir = d; pz.Lvl = lim; pz.Stop = stp;
-                string sig = (d == 1 ? "L" : "S") + z.Id.ToString(INV);
-                pz.Ord = d == 1 ? EnterLongLimit (0, true, Qty, lim, sig)
-                                : EnterShortLimit(0, true, Qty, lim, sig);
-
-                if (cambio)
-                    Log("ORDEN_LIMITE", d == 1 ? "LONG" : "SHORT", lim, stp, r, 0,
-                        "zona " + z.Id.ToString(INV) + ", colocada por adelantado");
+                double dist = Math.Abs(Close[0] - lvl);
+                if (dist < mejorDist)
+                {
+                    mejorDist = dist; mejor = z; mejorDir = d;
+                    mejorLvl = lvl; mejorStop = stp;
+                }
             }
 
-            // las zonas que dejaron de ser elegibles pierden su orden
+            if (mejor == null) { CancelPending(); return; }
+
+            double limPx = Instrument.MasterInstrument.RoundToTickSize(mejorLvl);
+
+            // fuera cualquier limite que no sea la de esta zona y a este precio
             var muertas = new List<long>();
-            foreach (var kv in pend) if (!vivas.Contains(kv.Key)) muertas.Add(kv.Key);
+            foreach (var kv in pend)
+                if (kv.Key != mejor.Id || kv.Value.Lvl != limPx || kv.Value.Dir != mejorDir)
+                    muertas.Add(kv.Key);
             foreach (var id in muertas) CancelZone(id);
+
+            Pend pz;
+            bool esNueva = !pend.TryGetValue(mejor.Id, out pz);
+            if (esNueva) { pz = new Pend(); pend[mejor.Id] = pz; }
+            bool cambio = esNueva || pz.Lvl != limPx || pz.Dir != mejorDir;
+
+            pz.Dir = mejorDir; pz.Lvl = limPx; pz.Stop = mejorStop;
+            string sig = (mejorDir == 1 ? "L" : "S") + mejor.Id.ToString(INV);
+            pz.Ord = mejorDir == 1 ? EnterLongLimit (0, true, Qty, limPx, sig)
+                                   : EnterShortLimit(0, true, Qty, limPx, sig);
+
+            if (cambio)
+                Log("ORDEN_LIMITE", mejorDir == 1 ? "LONG" : "SHORT", limPx, mejorStop,
+                    Math.Abs(limPx - mejorStop), 0,
+                    "zona " + mejor.Id.ToString(INV) + ", a " + mejorDist.ToString("F2", INV) + " pts del precio");
         }
 
         // El stop y el TP2 se fijan con el precio REALMENTE ejecutado.
