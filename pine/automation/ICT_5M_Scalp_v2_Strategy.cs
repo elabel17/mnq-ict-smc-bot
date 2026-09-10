@@ -167,6 +167,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Order  entryOrderL = null, entryOrderS = null;
         private double pendLvlL = 0, pendStopL = 0;
         private double pendLvlS = 0, pendStopS = 0;
+        private int    biasIdx = 1, tickIdx = 1;
         private double pendingLevelPrev = 0;   // para no repetir la linea de log cada vela
         private int    pendingDirPrev = 0;
 
@@ -213,20 +214,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 Description  = "ICT 5M Scalp v2 — entrada limite causal, SL/TP reales, sin sesgo 1H";
                 Name         = "ICT5MScalpV2";
-                // OnEachTick SOLO por el gatillo de BE: a vela cerrada el 63% de los
-                // movimientos a +LockR llegaban tarde y el broker los rechazaba.
-                // Todo lo demas (deteccion, zonas, limites) sigue corriendo una vez
-                // por vela con IsFirstTickOfBar, para no desviarse de la referencia.
-                Calculate                    = Calculate.OnEachTick;
+                // La logica de velas corre OnBarClose (indice 0 = vela CERRADA).
+                // El gatillo de BE necesita granularidad de tick, y se resuelve con
+                // una serie secundaria de 1 tick, no cambiando Calculate: con
+                // OnEachTick el indice 0 pasa a ser la vela en formacion y toda la
+                // deteccion se desplazaria una vela.
+                Calculate                    = Calculate.OnBarClose;
                 EntriesPerDirection          = 1;
                 EntryHandling                = EntryHandling.AllEntries;
                 IsExitOnSessionCloseStrategy = false;
                 ExitOnSessionCloseSeconds    = 30;
                 IsFillLimitOnTouch           = false;
                 MaximumBarsLookBack          = MaximumBarsLookBack.TwoHundredFiftySix;
-                OrderFillResolution          = OrderFillResolution.High;
-                OrderFillResolutionType      = BarsPeriodType.Minute;
-                OrderFillResolutionValue     = 1;
+                // Con varias series NinjaTrader no admite 'High', pero usa la serie
+                // mas granular para resolver los fills: la de 1 tick. Es mejor que
+                // High/1-minuto.
+                OrderFillResolution          = OrderFillResolution.Standard;
                 Slippage                     = 0;   // el slippage real se configura en las propiedades
                 StartBehavior                = StartBehavior.WaitUntilFlat;
                 TimeInForce                  = TimeInForce.Gtc;
@@ -259,14 +262,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // sola serie NinjaTrader permite 'Order Fill Resolution: High', que
                 // rellena las ordenes con datos de 1 minuto en vez de con el OHLC de
                 // la vela de 5m -- mucho mas fiel para las limites de esta estrategia.
-                if (Use1hBias)
-                    AddDataSeries(BarsPeriodType.Minute, 60);
+                if (Use1hBias) AddDataSeries(BarsPeriodType.Minute, 60);
+                AddDataSeries(BarsPeriodType.Tick, 1);   // solo para el gatillo de BE
+                biasIdx = 1;
+                tickIdx = Use1hBias ? 2 : 1;
                 rangeSeries = new Series<double>(this);
             }
             else if (State == State.DataLoaded)
             {
                 avgRange  = SMA(rangeSeries, DispLen);
-                if (Use1hBias) bias1hSma = SMA(Closes[1], BiasSmaLen);
+                if (Use1hBias) bias1hSma = SMA(Closes[biasIdx], BiasSmaLen);
                 nyTz      = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
 
                 if (WriteCsvLog)
@@ -340,29 +345,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
-            if (BarsInProgress != 0) return;
-            if (CurrentBars[0] < BarsRequiredToTrade) return;
-            if (Use1hBias && (CurrentBars.Length < 2 || CurrentBars[1] < BiasSmaLen + 1)) return;
-
-            // ---------- gatillo de BE: en CADA tick ----------
-            if (inPosition && Position.MarketPosition != MarketPosition.Flat
-                && CurrentBar != entryBar && BeTriggerR > 0 && !beMoved && riskPts > 0)
+            // ---------- gatillo de BE, sobre la serie de 1 tick ----------
+            if (BarsInProgress == tickIdx)
             {
-                double px = Close[0];   // ultimo precio negociado
-                double rNow = plannedDir == 1 ? (px - fillPrice) / riskPts
-                                              : (fillPrice - px) / riskPts;
-                if (rNow >= BeTriggerR)
+                if (inPosition && Position.MarketPosition != MarketPosition.Flat
+                    && CurrentBars[0] > entryBar && BeTriggerR > 0 && !beMoved && riskPts > 0)
                 {
-                    beMoved = true;
-                    activeStop = plannedDir == 1 ? fillPrice + riskPts * LockR
-                                                 : fillPrice - riskPts * LockR;
-                    Log("BE_MOVE", plannedDir == 1 ? "LONG" : "SHORT", px, activeStop, riskPts, 0,
-                        "intratick, alcanzo " + rNow.ToString("F2", INV) + "R");
-                    SubmitExits();
+                    double px   = Closes[tickIdx][0];
+                    double rNow = plannedDir == 1 ? (px - fillPrice) / riskPts
+                                                  : (fillPrice - px) / riskPts;
+                    if (rNow >= BeTriggerR)
+                    {
+                        beMoved = true;
+                        activeStop = plannedDir == 1 ? fillPrice + riskPts * LockR
+                                                     : fillPrice - riskPts * LockR;
+                        Log("BE_MOVE", plannedDir == 1 ? "LONG" : "SHORT", px, activeStop, riskPts, 0,
+                            "intratick, alcanzo " + rNow.ToString("F2", INV) + "R");
+                        SubmitExits();
+                    }
                 }
+                return;
             }
 
-            if (!IsFirstTickOfBar) return;   // el resto, una vez por vela
+            if (BarsInProgress != 0) return;
+            if (CurrentBars[0] < BarsRequiredToTrade) return;
+            if (Use1hBias && CurrentBars[biasIdx] < BiasSmaLen + 1) return;
 
             rangeSeries[0] = High[0] - Low[0];
             if (CurrentBars[0] < DispLen + 1) return;
@@ -481,7 +488,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             int h1Bias = 0;
             if (Use1hBias)
             {
-                double c1 = Closes[1][0], s1 = bias1hSma[0];
+                double c1 = Closes[biasIdx][0], s1 = bias1hSma[0];
                 h1Bias = c1 > s1 ? 1 : (c1 < s1 ? -1 : 0);
             }
 
