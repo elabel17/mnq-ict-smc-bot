@@ -1,23 +1,3 @@
-        private void CancelZone(long id)
-        {
-            Pend pz;
-            if (!pend.TryGetValue(id, out pz)) return;
-            if (pz.Ord != null && (pz.Ord.OrderState == OrderState.Working ||
-                                   pz.Ord.OrderState == OrderState.Accepted))
-            {
-                CancelOrder(pz.Ord);
-                Log("ORDEN_CANCELADA", pz.Dir == 1 ? "LONG" : "SHORT", pz.Lvl, 0, 0, 0,
-                    "zona " + id.ToString(INV));
-            }
-            pend.Remove(id);
-        }
-
-        private void CancelPending()
-        {
-            var ids = new List<long>(pend.Keys);
-            foreach (var id in ids) CancelZone(id);
-        }
-
 #region Using declarations
 using System;
 using System.Collections.Generic;
@@ -319,6 +299,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (csv != null) { try { csv.Flush(); csv.Close(); } catch (Exception) { } csv = null; }
             }
+        }
+
+        private void CancelZone(long id)
+        {
+            Pend pz;
+            if (!pend.TryGetValue(id, out pz)) return;
+            if (pz.Ord != null && (pz.Ord.OrderState == OrderState.Working ||
+                                   pz.Ord.OrderState == OrderState.Accepted))
+            {
+                CancelOrder(pz.Ord);
+                Log("ORDEN_CANCELADA", pz.Dir == 1 ? "LONG" : "SHORT", pz.Lvl, 0, 0, 0,
+                    "zona " + id.ToString(INV));
+            }
+            pend.Remove(id);
+        }
+
+        private void CancelPending()
+        {
+            var ids = new List<long>(pend.Keys);
+            foreach (var id in ids) CancelZone(id);
         }
 
         // Salidas como ordenes explicitas en vez de SetStopLoss/SetProfitTarget.
