@@ -73,7 +73,15 @@ sessionStartHour = input.int(3, "Hora inicio sesion (NY)", minval=0, maxval=23, 
 sessionEndHour   = input.int(11, "Hora fin sesion (NY, exclusiva)", minval=0, maxval=23, group="Sesion")
 
 // ---------------- Sesgo de 1H ----------------
-use1hBias      = input.bool(true, "Aplicar filtro de sesgo de 1H", group="Sesgo 1H")
+use1hBias      = input.bool(false, "Aplicar filtro de sesgo de 1H (NO recomendado, ver nota)", group="Sesgo 1H")
+// NOTA 2026-09-10: el filtro se apaga por defecto. El beneficio que se le
+// atribuia venia de un error de fechado en el motor Python (usaba el cierre
+// de la hora EN CURSO, informacion futura). Corregido el fechado, en el mismo
+// motor: con sesgo look-ahead $386.343 PF 3.02 / con sesgo causal $217.733
+// PF 1.87 / SIN filtro $387.000 PF 1.89. El filtro causal no mejora el PF y
+// elimina la mitad de las operaciones. Este script SIEMPRE fue causal
+// (lookahead_off), asi que ya venia rindiendo como la fila causal, no como
+// la del informe.
 biasSmaLen     = input.int(10, "Largo de la SMA de 1H para el sesgo", minval=3, maxval=50, group="Sesgo 1H")
 
 // ---------------- Visual ----------------
