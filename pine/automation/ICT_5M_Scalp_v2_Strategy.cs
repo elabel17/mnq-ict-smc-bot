@@ -161,9 +161,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int    plannedDir, entryBar = -1;
         private bool   beMoved, inPosition;
 
-        private Order  pendingEntry = null;
-        private double pendingLevel = 0, pendingStop = 0;
-        private int    pendingDir = 0;
+        // Una referencia POR LADO. Antes habia una sola y al cambiar de direccion
+        // se perdia la referencia a la orden anterior, que seguia viva en el
+        // mercado: podian quedar una compra y una venta descansando a la vez.
+        private Order  entryOrderL = null, entryOrderS = null;
+        private double pendLvlL = 0, pendStopL = 0;
+        private double pendLvlS = 0, pendStopS = 0;
         private double pendingLevelPrev = 0;   // para no repetir la linea de log cada vela
         private int    pendingDirPrev = 0;
 
@@ -395,6 +398,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 else if (z.Dir == -1 && High[0] < z.Bot) z.Cleared = true;
             }
 
+            // ---------- red de seguridad ----------
+            // Posicion abierta que la estrategia no reconoce = estado inconsistente.
+            // Sin salidas vivas se quedaria colgada para siempre; se cierra a mercado.
+            if (!inPosition && Position.MarketPosition != MarketPosition.Flat)
+            {
+                Print(Time[0] + "  POSICION HUERFANA -> cerrando a mercado");
+                Log("HUERFANA", Position.MarketPosition.ToString(), Close[0], 0, 0, 0,
+                    "posicion sin registro interno, cierre forzado");
+                if (Position.MarketPosition == MarketPosition.Long) ExitLong("HUERFANA", "");
+                else                                                ExitShort("HUERFANA", "");
+                return;
+            }
+
             // ---------- gestion de la posicion abierta ----------
             if (inPosition && Position.MarketPosition != MarketPosition.Flat)
             {
@@ -477,10 +493,24 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (candDir != 0)
             {
                 double lim = Instrument.MasterInstrument.RoundToTickSize(candLevel);
-                pendingDir = candDir; pendingStop = candStop; pendingLevel = lim;
                 bool nuevaOrden = (pendingLevelPrev != lim || pendingDirPrev != candDir);
-                if (candDir == 1) pendingEntry = EnterLongLimit(0, true, Qty, lim, "ICT5-L");
-                else              pendingEntry = EnterShortLimit(0, true, Qty, lim, "ICT5-S");
+
+                // Al cambiar de direccion hay que CANCELAR el lado contrario. Si no,
+                // la limite vieja sigue descansando y puede ejecutarse cuando la
+                // estrategia ya cree estar esperando la contraria.
+                if (candDir == 1)
+                {
+                    CancelSide(-1);
+                    pendLvlL = lim; pendStopL = candStop;
+                    entryOrderL = EnterLongLimit(0, true, Qty, lim, "ICT5-L");
+                }
+                else
+                {
+                    CancelSide(1);
+                    pendLvlS = lim; pendStopS = candStop;
+                    entryOrderS = EnterShortLimit(0, true, Qty, lim, "ICT5-S");
+                }
+
                 if (nuevaOrden)
                     Log("ORDEN_LIMITE", candDir == 1 ? "LONG" : "SHORT", lim, candStop,
                         Math.Abs(lim - candStop), 0, "colocada por adelantado");
@@ -489,15 +519,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             else CancelPending();
         }
 
+        private void CancelSide(int dir)
+        {
+            Order o = dir == 1 ? entryOrderL : entryOrderS;
+            if (o != null && (o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted))
+            {
+                CancelOrder(o);
+                Log("ORDEN_CANCELADA", dir == 1 ? "LONG" : "SHORT",
+                    dir == 1 ? pendLvlL : pendLvlS, 0, 0, 0, "");
+            }
+            if (dir == 1) { entryOrderL = null; pendLvlL = 0; pendStopL = 0; }
+            else          { entryOrderS = null; pendLvlS = 0; pendStopS = 0; }
+        }
+
         private void CancelPending()
         {
-            if (pendingEntry != null &&
-                (pendingEntry.OrderState == OrderState.Working || pendingEntry.OrderState == OrderState.Accepted))
-            {
-                CancelOrder(pendingEntry);
-                Log("ORDEN_CANCELADA", pendingDirPrev == 1 ? "LONG" : "SHORT", pendingLevelPrev, 0, 0, 0, "");
-            }
-            pendingEntry = null;
+            CancelSide(1);
+            CancelSide(-1);
             pendingLevelPrev = 0; pendingDirPrev = 0;
         }
 
@@ -510,15 +548,22 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (isEntry && execution.Order.OrderState == OrderState.Filled)
             {
+                bool esLargo = execution.Order.Name == "ICT5-L";
+                double stopDeEsaOrden = esLargo ? pendStopL : pendStopS;
+                double nivelPedido    = esLargo ? pendLvlL  : pendLvlS;
+
                 fillPrice   = price;
-                plannedDir  = pendingDir;
-                plannedStop = pendingStop;
-                activeStop  = pendingStop;
-                riskPts     = Math.Abs(fillPrice - pendingStop);
+                plannedDir  = esLargo ? 1 : -1;      // <- de la orden ejecutada
+                plannedStop = stopDeEsaOrden;
+                activeStop  = stopDeEsaOrden;
+                riskPts     = Math.Abs(fillPrice - stopDeEsaOrden);
                 beMoved     = false;
                 entryBar    = CurrentBar;
                 inPosition  = true;
-                pendingEntry = null;
+
+                // La contraria ya no tiene sentido: fuera del mercado.
+                CancelSide(esLargo ? -1 : 1);
+                if (esLargo) entryOrderL = null; else entryOrderS = null;
 
                 if (riskPts <= 0)
                 {
@@ -537,8 +582,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Print(string.Format("{0}  ENTRADA {1} fill={2:F2} stop={3:F2} riesgo={4:F2}pts TP2={5:F2}",
                     Time[0], plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target));
                 Log("FILL_ENTRADA", plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target,
-                    "pedido " + pendingLevel.ToString("F2", INV) + ", diferencia "
-                    + (Math.Abs(fillPrice - pendingLevel)).ToString("F2", INV) + " pts");
+                    "pedido " + nivelPedido.ToString("F2", INV) + ", diferencia "
+                    + (Math.Abs(fillPrice - nivelPedido)).ToString("F2", INV) + " pts");
             }
 
             if (Position.MarketPosition == MarketPosition.Flat)
