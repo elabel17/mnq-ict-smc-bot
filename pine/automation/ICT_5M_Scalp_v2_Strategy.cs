@@ -213,7 +213,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 Description  = "ICT 5M Scalp v2 — entrada limite causal, SL/TP reales, sin sesgo 1H";
                 Name         = "ICT5MScalpV2";
-                Calculate                    = Calculate.OnBarClose;
+                // OnEachTick SOLO por el gatillo de BE: a vela cerrada el 63% de los
+                // movimientos a +LockR llegaban tarde y el broker los rechazaba.
+                // Todo lo demas (deteccion, zonas, limites) sigue corriendo una vez
+                // por vela con IsFirstTickOfBar, para no desviarse de la referencia.
+                Calculate                    = Calculate.OnEachTick;
                 EntriesPerDirection          = 1;
                 EntryHandling                = EntryHandling.AllEntries;
                 IsExitOnSessionCloseStrategy = false;
@@ -340,6 +344,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (CurrentBars[0] < BarsRequiredToTrade) return;
             if (Use1hBias && (CurrentBars.Length < 2 || CurrentBars[1] < BiasSmaLen + 1)) return;
 
+            // ---------- gatillo de BE: en CADA tick ----------
+            if (inPosition && Position.MarketPosition != MarketPosition.Flat
+                && CurrentBar != entryBar && BeTriggerR > 0 && !beMoved && riskPts > 0)
+            {
+                double px = Close[0];   // ultimo precio negociado
+                double rNow = plannedDir == 1 ? (px - fillPrice) / riskPts
+                                              : (fillPrice - px) / riskPts;
+                if (rNow >= BeTriggerR)
+                {
+                    beMoved = true;
+                    activeStop = plannedDir == 1 ? fillPrice + riskPts * LockR
+                                                 : fillPrice - riskPts * LockR;
+                    Log("BE_MOVE", plannedDir == 1 ? "LONG" : "SHORT", px, activeStop, riskPts, 0,
+                        "intratick, alcanzo " + rNow.ToString("F2", INV) + "R");
+                    SubmitExits();
+                }
+            }
+
+            if (!IsFirstTickOfBar) return;   // el resto, una vez por vela
+
             rangeSeries[0] = High[0] - Low[0];
             if (CurrentBars[0] < DispLen + 1) return;
 
@@ -444,23 +468,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             // ---------- gestion de la posicion abierta ----------
             if (inPosition && Position.MarketPosition != MarketPosition.Flat)
             {
-                // nunca gestionar en la misma vela del fill
-                if (CurrentBar != entryBar && BeTriggerR > 0 && !beMoved)
-                {
-                    double reachedR = plannedDir == 1
-                        ? (High[0] - fillPrice) / riskPts
-                        : (fillPrice - Low[0]) / riskPts;
-                    if (reachedR >= BeTriggerR)
-                    {
-                        beMoved = true;
-                        activeStop = plannedDir == 1
-                            ? fillPrice + riskPts * LockR
-                            : fillPrice - riskPts * LockR;
-                        Print(Time[0] + "  BE -> stop " + activeStop.ToString("F2"));
-                        Log("BE_MOVE", plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, 0,
-                            "alcanzo " + BeTriggerR.ToString("F2", INV) + "R, asegura " + LockR.ToString("F2", INV) + "R");
-                    }
-                }
                 SubmitExits();   // mantiene vivas SL y TP2 con el precio actual
                 return;
             }
