@@ -2,6 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.IO;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
@@ -136,6 +138,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty] [Display(Name="Largo SMA de 1H", Order=2, GroupName="6. Sesgo 1H")]
         public int BiasSmaLen { get; set; }
 
+        // ---------------- Registro para verificacion ----------------
+        [NinjaScriptProperty] [Display(Name="Escribir CSV de verificacion", Order=1, GroupName="7. Registro")]
+        public bool WriteCsvLog { get; set; }
+
+        [NinjaScriptProperty] [Display(Name="Carpeta del CSV", Order=2, GroupName="7. Registro")]
+        public string CsvFolder { get; set; }
+
         // ---------------- Estado ----------------
         private class Zone
         {
@@ -155,10 +164,45 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Order  pendingEntry = null;
         private double pendingLevel = 0, pendingStop = 0;
         private int    pendingDir = 0;
+        private double pendingLevelPrev = 0;   // para no repetir la linea de log cada vela
+        private int    pendingDirPrev = 0;
 
         private double dayStartPnL = 0;
         private DateTime currentDay = DateTime.MinValue;
         private bool haltToday = false, haltTotal = false;
+
+        // ---------------- Registro CSV ----------------
+        private StreamWriter csv = null;
+        private static readonly CultureInfo INV = CultureInfo.InvariantCulture;
+
+        // Una linea por evento. El objetivo es poder comparar, fuera de
+        // NinjaTrader, cada operacion contra el motor Python de referencia.
+        private void Log(string evento, string dirTxt, double px, double stop,
+                         double risk, double target, string nota)
+        {
+            if (csv == null) return;
+            try
+            {
+                DateTime ny = NyTime(Time[0]);
+                csv.WriteLine(string.Join(";", new string[] {
+                    Time[0].ToString("yyyy-MM-dd HH:mm:ss", INV),
+                    ny.ToString("yyyy-MM-dd HH:mm", INV),
+                    evento, dirTxt,
+                    px     == 0 ? "" : px.ToString("F2", INV),
+                    stop   == 0 ? "" : stop.ToString("F2", INV),
+                    risk   == 0 ? "" : risk.ToString("F2", INV),
+                    target == 0 ? "" : target.ToString("F2", INV),
+                    Open[0].ToString("F2", INV), High[0].ToString("F2", INV),
+                    Low[0].ToString("F2", INV),  Close[0].ToString("F2", INV),
+                    Position.MarketPosition.ToString(),
+                    Position.Quantity.ToString(INV),
+                    SystemPerformance.AllTrades.TradesPerformance.Currency.CumProfit.ToString("F2", INV),
+                    zones.Count.ToString(INV),
+                    nota
+                }));
+            }
+            catch (Exception) { /* nunca dejar que el log rompa la estrategia */ }
+        }
 
         protected override void OnStateChange()
         {
@@ -198,6 +242,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 SessionStartHour = 3; SessionEndHour = 11;
 
                 Use1hBias = false; BiasSmaLen = 10;
+
+                WriteCsvLog = true;
+                CsvFolder   = @"C:\Users\diazl\Documents\NinjaTrader 8\export";
             }
             else if (State == State.Configure)
             {
@@ -209,6 +256,25 @@ namespace NinjaTrader.NinjaScript.Strategies
                 avgRange  = SMA(rangeSeries, DispLen);
                 bias1hSma = SMA(Closes[1], BiasSmaLen);
                 nyTz      = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
+                if (WriteCsvLog)
+                {
+                    try
+                    {
+                        if (!Directory.Exists(CsvFolder)) Directory.CreateDirectory(CsvFolder);
+                        string f = Path.Combine(CsvFolder,
+                            "ICT5M_verify_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", INV) + ".csv");
+                        csv = new StreamWriter(f, false);
+                        csv.AutoFlush = true;
+                        csv.WriteLine("bar_time;ny_time;evento;dir;precio;stop;riesgo;target;o;h;l;c;posicion;qty;pnl_acum;zonas_vivas;nota");
+                        Print("CSV de verificacion: " + f);
+                    }
+                    catch (Exception ex) { Print("No se pudo abrir el CSV: " + ex.Message); csv = null; }
+                }
+            }
+            else if (State == State.Terminated)
+            {
+                if (csv != null) { try { csv.Flush(); csv.Close(); } catch (Exception) { } csv = null; }
             }
         }
 
@@ -260,7 +326,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                             if (Low[k] <= candBot + LiqTolerancePts) { cu++; if (cu > mx) mx = cu; } else cu = 0;
                         }
                         if (mx < LiqAccumBars)
+                        {
                             zones.Add(new Zone { Dir = 1, Top = High[idx], Bot = candBot, Cleared = false, Born = CurrentBar });
+                            Log("ZONA_NUEVA", "LONG", High[idx], candBot, 0, 0, "top/bot de la zona");
+                        }
                     }
                 }
                 if (Close[0] < Open[0] && (High[0] - Close[0]) >= DispCloseFrac * rng)
@@ -278,7 +347,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                             if (High[k] >= candTop - LiqTolerancePts) { cu++; if (cu > mx) mx = cu; } else cu = 0;
                         }
                         if (mx < LiqAccumBars)
+                        {
                             zones.Add(new Zone { Dir = -1, Top = candTop, Bot = Low[idx], Cleared = false, Born = CurrentBar });
+                            Log("ZONA_NUEVA", "SHORT", candTop, Low[idx], 0, 0, "top/bot de la zona");
+                        }
                     }
                 }
                 if (zones.Count > MaxZones) zones.RemoveRange(0, zones.Count - MaxZones);
@@ -309,6 +381,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                             : fillPrice - riskPts * LockR;
                         SetStopLoss(CalculationMode.Price, Instrument.MasterInstrument.RoundToTickSize(activeStop));
                         Print(Time[0] + "  BE -> stop " + activeStop.ToString("F2"));
+                        Log("BE_MOVE", plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, 0,
+                            "alcanzo " + BeTriggerR.ToString("F2", INV) + "R, asegura " + LockR.ToString("F2", INV) + "R");
                     }
                 }
                 return;
@@ -373,8 +447,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 double lim = Instrument.MasterInstrument.RoundToTickSize(candLevel);
                 pendingDir = candDir; pendingStop = candStop; pendingLevel = lim;
+                bool nuevaOrden = (pendingLevelPrev != lim || pendingDirPrev != candDir);
                 if (candDir == 1) pendingEntry = EnterLongLimit(0, true, Qty, lim, "ICT5-L");
                 else              pendingEntry = EnterShortLimit(0, true, Qty, lim, "ICT5-S");
+                if (nuevaOrden)
+                    Log("ORDEN_LIMITE", candDir == 1 ? "LONG" : "SHORT", lim, candStop,
+                        Math.Abs(lim - candStop), 0, "colocada por adelantado");
+                pendingLevelPrev = lim; pendingDirPrev = candDir;
             }
             else CancelPending();
         }
@@ -383,8 +462,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (pendingEntry != null &&
                 (pendingEntry.OrderState == OrderState.Working || pendingEntry.OrderState == OrderState.Accepted))
+            {
                 CancelOrder(pendingEntry);
+                Log("ORDEN_CANCELADA", pendingDirPrev == 1 ? "LONG" : "SHORT", pendingLevelPrev, 0, 0, 0, "");
+            }
             pendingEntry = null;
+            pendingLevelPrev = 0; pendingDirPrev = 0;
         }
 
         // El stop y el TP2 se fijan con el precio REALMENTE ejecutado.
@@ -422,10 +505,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 Print(string.Format("{0}  ENTRADA {1} fill={2:F2} stop={3:F2} riesgo={4:F2}pts TP2={5:F2}",
                     Time[0], plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target));
+                Log("FILL_ENTRADA", plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target,
+                    "pedido " + pendingLevel.ToString("F2", INV) + ", diferencia "
+                    + (Math.Abs(fillPrice - pendingLevel)).ToString("F2", INV) + " pts");
             }
 
             if (Position.MarketPosition == MarketPosition.Flat)
             {
+                if (inPosition)
+                {
+                    double ultimo = 0;
+                    int nt = SystemPerformance.AllTrades.Count;
+                    if (nt > 0) ultimo = SystemPerformance.AllTrades[nt - 1].ProfitCurrency;
+                    Log("SALIDA", plannedDir == 1 ? "LONG" : "SHORT", price, activeStop, riskPts, 0,
+                        (beMoved ? "con BE activado" : "sin BE") + ", pnl " + ultimo.ToString("F2", INV));
+                }
                 inPosition = false; beMoved = false; entryBar = -1;
             }
         }
