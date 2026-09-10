@@ -1,3 +1,23 @@
+        private void CancelZone(long id)
+        {
+            Pend pz;
+            if (!pend.TryGetValue(id, out pz)) return;
+            if (pz.Ord != null && (pz.Ord.OrderState == OrderState.Working ||
+                                   pz.Ord.OrderState == OrderState.Accepted))
+            {
+                CancelOrder(pz.Ord);
+                Log("ORDEN_CANCELADA", pz.Dir == 1 ? "LONG" : "SHORT", pz.Lvl, 0, 0, 0,
+                    "zona " + id.ToString(INV));
+            }
+            pend.Remove(id);
+        }
+
+        private void CancelPending()
+        {
+            var ids = new List<long>(pend.Keys);
+            foreach (var id in ids) CancelZone(id);
+        }
+
 #region Using declarations
 using System;
 using System.Collections.Generic;
@@ -149,7 +169,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private class Zone
         {
             public int Dir; public double Top; public double Bot;
-            public bool Cleared; public int Born;
+            public bool Cleared; public int Born; public long Id;
         }
         private List<Zone> zones = new List<Zone>();
 
@@ -164,12 +184,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         // Una referencia POR LADO. Antes habia una sola y al cambiar de direccion
         // se perdia la referencia a la orden anterior, que seguia viva en el
         // mercado: podian quedar una compra y una venta descansando a la vez.
-        private Order  entryOrderL = null, entryOrderS = null;
-        private double pendLvlL = 0, pendStopL = 0;
-        private double pendLvlS = 0, pendStopS = 0;
+        // Una orden limite POR ZONA viva. El motor Python evalua en cada vela
+        // TODAS las zonas y entra en la que el precio toque; con una sola orden
+        // descansando en la zona mas reciente se perdian todos los toques a las
+        // demas -- de ahi las 61 operaciones frente a 89 de la referencia.
+        private class Pend { public Order Ord; public int Dir; public double Lvl, Stop; }
+        private readonly Dictionary<long, Pend> pend = new Dictionary<long, Pend>();
+        private long zoneSeq = 0;
         private int    biasIdx = 1, tickIdx = 1;
-        private double pendingLevelPrev = 0;   // para no repetir la linea de log cada vela
-        private int    pendingDirPrev = 0;
+        private string entrySignal = "";   // nombre de la senal que realmente entro
 
         private double dayStartPnL = 0;
         private DateTime currentDay = DateTime.MinValue;
@@ -220,8 +243,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // OnEachTick el indice 0 pasa a ser la vela en formacion y toda la
                 // deteccion se desplazaria una vela.
                 Calculate                    = Calculate.OnBarClose;
-                EntriesPerDirection          = 1;
-                EntryHandling                = EntryHandling.AllEntries;
+                // Varias limites descansando a la vez (una por zona), cada una con
+                // su propio nombre de senal. UniqueEntries permite tenerlas vivas;
+                // al primer fill se cancelan todas las demas.
+                EntriesPerDirection          = 40;
+                EntryHandling                = EntryHandling.UniqueEntries;
                 IsExitOnSessionCloseStrategy = false;
                 ExitOnSessionCloseSeconds    = 30;
                 IsFillLimitOnTouch           = false;
@@ -320,18 +346,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Log("STOP_INALCANZABLE", plannedDir == 1 ? "LONG" : "SHORT", ref0, sl, riskPts, 0,
                     "stop del lado equivocado del mercado, salida a mercado; diferencia "
                     + (Math.Abs(ref0 - sl)).ToString("F2", INV) + " pts");
-                if (plannedDir == 1) ExitLong("STOPX", "ICT5-L"); else ExitShort("STOPX", "ICT5-S");
+                if (plannedDir == 1) ExitLong("STOPX", entrySignal); else ExitShort("STOPX", entrySignal);
                 return;
             }
             if (plannedDir == 1)
             {
-                ExitLongStopMarket(0, true, q, sl, "SL", "ICT5-L");
-                ExitLongLimit     (0, true, q, tp, "TP", "ICT5-L");
+                ExitLongStopMarket(0, true, q, sl, "SL", entrySignal);
+                ExitLongLimit     (0, true, q, tp, "TP", entrySignal);
             }
             else
             {
-                ExitShortStopMarket(0, true, q, sl, "SL", "ICT5-S");
-                ExitShortLimit     (0, true, q, tp, "TP", "ICT5-S");
+                ExitShortStopMarket(0, true, q, sl, "SL", entrySignal);
+                ExitShortLimit     (0, true, q, tp, "TP", entrySignal);
             }
         }
 
@@ -409,7 +435,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         }
                         if (mx < LiqAccumBars)
                         {
-                            zones.Add(new Zone { Dir = 1, Top = High[idx], Bot = candBot, Cleared = false, Born = CurrentBar });
+                            zones.Add(new Zone { Dir = 1, Top = High[idx], Bot = candBot, Cleared = false, Born = CurrentBar, Id = ++zoneSeq });
                             Log("ZONA_NUEVA", "LONG", High[idx], candBot, 0, 0, "top/bot de la zona");
                         }
                     }
@@ -430,7 +456,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         }
                         if (mx < LiqAccumBars)
                         {
-                            zones.Add(new Zone { Dir = -1, Top = candTop, Bot = Low[idx], Cleared = false, Born = CurrentBar });
+                            zones.Add(new Zone { Dir = -1, Top = candTop, Bot = Low[idx], Cleared = false, Born = CurrentBar, Id = ++zoneSeq });
                             Log("ZONA_NUEVA", "SHORT", candTop, Low[idx], 0, 0, "top/bot de la zona");
                         }
                     }
@@ -492,86 +518,57 @@ namespace NinjaTrader.NinjaScript.Strategies
                 h1Bias = c1 > s1 ? 1 : (c1 < s1 ? -1 : 0);
             }
 
-            // ---------- candidata: zona viva mas reciente que el precio AUN no cruzo ----------
-            int candDir = 0, candBorn = -1;
-            double candLevel = 0, candStop = 0;
-
+            // ---------- una limite descansando en CADA zona elegible ----------
+            var vivas = new HashSet<long>();
             foreach (var z in zones)
             {
                 if (z.Born == CurrentBar || !z.Cleared) continue;
                 if ((CurrentBar - z.Born) > ZoneMaxAge) continue;
-                if (z.Born <= candBorn) continue;
 
+                int    d;
+                double lvl, stp;
                 if (z.Dir == 1)
                 {
                     if (Use1hBias && h1Bias <= 0) continue;
-                    double lvl = EntryAtBufferEdge ? z.Top + EntryBufferPts : z.Top;
-                    double stp = z.Bot - SlBufferPts;
-                    double r   = lvl - stp;
-                    if (r <= 0 || (UseRiskCap && r > MaxRiskPts)) continue;
-                    if (Close[0] <= lvl) continue;             // el precio ya lo cruzo: no perseguir
-                    candDir = 1; candBorn = z.Born; candLevel = lvl; candStop = stp;
+                    d = 1;
+                    lvl = EntryAtBufferEdge ? z.Top + EntryBufferPts : z.Top;
+                    stp = z.Bot - SlBufferPts;
+                    if (Close[0] <= lvl) continue;   // el precio ya lo cruzo: no perseguir
                 }
                 else
                 {
                     if (Use1hBias && h1Bias >= 0) continue;
-                    double lvl = EntryAtBufferEdge ? z.Bot - EntryBufferPts : z.Bot;
-                    double stp = z.Top + SlBufferPts;
-                    double r   = stp - lvl;
-                    if (r <= 0 || (UseRiskCap && r > MaxRiskPts)) continue;
+                    d = -1;
+                    lvl = EntryAtBufferEdge ? z.Bot - EntryBufferPts : z.Bot;
+                    stp = z.Top + SlBufferPts;
                     if (Close[0] >= lvl) continue;
-                    candDir = -1; candBorn = z.Born; candLevel = lvl; candStop = stp;
-                }
-            }
-
-            // ---------- colocar / refrescar la limite ----------
-            if (candDir != 0)
-            {
-                double lim = Instrument.MasterInstrument.RoundToTickSize(candLevel);
-                bool nuevaOrden = (pendingLevelPrev != lim || pendingDirPrev != candDir);
-
-                // Al cambiar de direccion hay que CANCELAR el lado contrario. Si no,
-                // la limite vieja sigue descansando y puede ejecutarse cuando la
-                // estrategia ya cree estar esperando la contraria.
-                if (candDir == 1)
-                {
-                    CancelSide(-1);
-                    pendLvlL = lim; pendStopL = candStop;
-                    entryOrderL = EnterLongLimit(0, true, Qty, lim, "ICT5-L");
-                }
-                else
-                {
-                    CancelSide(1);
-                    pendLvlS = lim; pendStopS = candStop;
-                    entryOrderS = EnterShortLimit(0, true, Qty, lim, "ICT5-S");
                 }
 
-                if (nuevaOrden)
-                    Log("ORDEN_LIMITE", candDir == 1 ? "LONG" : "SHORT", lim, candStop,
-                        Math.Abs(lim - candStop), 0, "colocada por adelantado");
-                pendingLevelPrev = lim; pendingDirPrev = candDir;
-            }
-            else CancelPending();
-        }
+                double r = Math.Abs(lvl - stp);
+                if (r <= 0 || (UseRiskCap && r > MaxRiskPts)) continue;
 
-        private void CancelSide(int dir)
-        {
-            Order o = dir == 1 ? entryOrderL : entryOrderS;
-            if (o != null && (o.OrderState == OrderState.Working || o.OrderState == OrderState.Accepted))
-            {
-                CancelOrder(o);
-                Log("ORDEN_CANCELADA", dir == 1 ? "LONG" : "SHORT",
-                    dir == 1 ? pendLvlL : pendLvlS, 0, 0, 0, "");
-            }
-            if (dir == 1) { entryOrderL = null; pendLvlL = 0; pendStopL = 0; }
-            else          { entryOrderS = null; pendLvlS = 0; pendStopS = 0; }
-        }
+                double lim = Instrument.MasterInstrument.RoundToTickSize(lvl);
+                vivas.Add(z.Id);
 
-        private void CancelPending()
-        {
-            CancelSide(1);
-            CancelSide(-1);
-            pendingLevelPrev = 0; pendingDirPrev = 0;
+                Pend pz;
+                bool esNueva = !pend.TryGetValue(z.Id, out pz);
+                if (esNueva) { pz = new Pend(); pend[z.Id] = pz; }
+                bool cambio = esNueva || pz.Lvl != lim || pz.Dir != d;
+
+                pz.Dir = d; pz.Lvl = lim; pz.Stop = stp;
+                string sig = (d == 1 ? "L" : "S") + z.Id.ToString(INV);
+                pz.Ord = d == 1 ? EnterLongLimit (0, true, Qty, lim, sig)
+                                : EnterShortLimit(0, true, Qty, lim, sig);
+
+                if (cambio)
+                    Log("ORDEN_LIMITE", d == 1 ? "LONG" : "SHORT", lim, stp, r, 0,
+                        "zona " + z.Id.ToString(INV) + ", colocada por adelantado");
+            }
+
+            // las zonas que dejaron de ser elegibles pierden su orden
+            var muertas = new List<long>();
+            foreach (var kv in pend) if (!vivas.Contains(kv.Key)) muertas.Add(kv.Key);
+            foreach (var id in muertas) CancelZone(id);
         }
 
         // El stop y el TP2 se fijan con el precio REALMENTE ejecutado.
@@ -579,31 +576,42 @@ namespace NinjaTrader.NinjaScript.Strategies
             int quantity, MarketPosition marketPosition, string orderId, DateTime time)
         {
             if (execution.Order == null) return;
-            bool isEntry = execution.Order.Name == "ICT5-L" || execution.Order.Name == "ICT5-S";
+            string nm = execution.Order.Name;
+            bool isEntry = nm.Length > 1 && (nm[0] == 'L' || nm[0] == 'S');
+            long zid = 0;
+            if (isEntry && !long.TryParse(nm.Substring(1), NumberStyles.Integer, INV, out zid)) isEntry = false;
 
             if (isEntry && execution.Order.OrderState == OrderState.Filled)
             {
-                bool esLargo = execution.Order.Name == "ICT5-L";
-                double stopDeEsaOrden = esLargo ? pendStopL : pendStopS;
-                double nivelPedido    = esLargo ? pendLvlL  : pendLvlS;
+                bool esLargo = nm[0] == 'L';
+                Pend pz;
+                if (!pend.TryGetValue(zid, out pz))
+                {
+                    // No deberia pasar nunca: fill de una orden que ya no seguimos.
+                    Log("FILL_HUERFANO", esLargo ? "LONG" : "SHORT", price, 0, 0, 0, "zona " + zid.ToString(INV));
+                    if (esLargo) ExitLong("SINDATO", nm); else ExitShort("SINDATO", nm);
+                    return;
+                }
 
                 fillPrice   = price;
                 plannedDir  = esLargo ? 1 : -1;      // <- de la orden ejecutada
-                plannedStop = stopDeEsaOrden;
-                activeStop  = stopDeEsaOrden;
-                riskPts     = Math.Abs(fillPrice - stopDeEsaOrden);
+                plannedStop = pz.Stop;
+                activeStop  = pz.Stop;
+                riskPts     = Math.Abs(fillPrice - pz.Stop);
                 beMoved     = false;
                 entryBar    = CurrentBar;
                 inPosition  = true;
+                entrySignal = nm;
+                double nivelPedido = pz.Lvl;
 
-                // La contraria ya no tiene sentido: fuera del mercado.
-                CancelSide(esLargo ? -1 : 1);
-                if (esLargo) entryOrderL = null; else entryOrderS = null;
+                // Una sola operacion a la vez: fuera TODAS las demas limites.
+                pend.Remove(zid);
+                CancelPending();
 
                 if (riskPts <= 0)
                 {
                     Print("Riesgo invalido tras el fill — cerrando por seguridad.");
-                    if (plannedDir == 1) ExitLong("SAFE", "ICT5-L"); else ExitShort("SAFE", "ICT5-S");
+                    if (plannedDir == 1) ExitLong("SAFE", entrySignal); else ExitShort("SAFE", entrySignal);
                     return;
                 }
 
@@ -617,7 +625,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Print(string.Format("{0}  ENTRADA {1} fill={2:F2} stop={3:F2} riesgo={4:F2}pts TP2={5:F2}",
                     Time[0], plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target));
                 Log("FILL_ENTRADA", plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target,
-                    "pedido " + nivelPedido.ToString("F2", INV) + ", diferencia "
+                    "zona " + zid.ToString(INV) + ", pedido " + nivelPedido.ToString("F2", INV) + ", diferencia "
                     + (Math.Abs(fillPrice - nivelPedido)).ToString("F2", INV) + " pts");
             }
 
