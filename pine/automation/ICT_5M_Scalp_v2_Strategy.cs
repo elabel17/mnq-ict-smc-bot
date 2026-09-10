@@ -246,7 +246,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 IsInstantiatedOnEachOptimizationIteration = false;
 
                 Qty = 3;  EntryAtBufferEdge = true;
-                DailyLossLimit = 800;  TotalLossLimit = 1700;  ProfitTargetStop = 3000;
+                // A CERO por defecto: los frenos falsean cualquier comparacion
+                // contra el motor, que no los tiene. Valores para operar en real:
+                // diaria 800, total 1700, objetivo 3000.
+                DailyLossLimit = 0;  TotalLossLimit = 0;  ProfitTargetStop = 0;
 
                 DispLen = 60; DispMult = 1.5; DispCloseFrac = 0.6; ObScanBars = 10;
                 LiqCheckBars = 12; LiqTolerancePts = 1.0; LiqAccumBars = 15;
