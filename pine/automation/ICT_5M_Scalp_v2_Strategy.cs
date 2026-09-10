@@ -280,7 +280,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private DateTime NyTime(DateTime barTime)
         {
-            return TimeZoneInfo.ConvertTime(barTime, Globals.GeneralOptions.TimeZoneInfo, nyTz);
+            // Globals vive en NinjaTrader.Core; hay que calificarlo entero porque
+            // dentro de la clase Strategy el nombre corto no resuelve.
+            return TimeZoneInfo.ConvertTime(barTime,
+                       NinjaTrader.Core.Globals.GeneralOptions.TimeZoneInfo, nyTz);
         }
 
         protected override void OnBarUpdate()
