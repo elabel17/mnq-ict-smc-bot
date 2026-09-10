@@ -415,6 +415,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 else if (z.Dir == -1 && High[0] < z.Bot) z.Cleared = true;
             }
 
+            // ---------- purgar zonas ----------
+            // TIENE que ir antes de cualquier 'return': si se salta mientras hay
+            // una posicion abierta, las zonas tocadas durante la operacion
+            // sobreviven y se vuelven a operar despues. El motor Python las purga
+            // en cada vela pase lo que pase.
+            zones.RemoveAll(z =>
+            {
+                bool expired  = (CurrentBar - z.Born) > ZoneMaxAge;
+                bool consumed = z.Born != CurrentBar && z.Cleared &&
+                                ((z.Dir == 1 && Low[0] <= z.Top) || (z.Dir == -1 && High[0] >= z.Bot));
+                return expired || consumed;
+            });
+
             // ---------- red de seguridad ----------
             // Posicion abierta que la estrategia no reconoce = estado inconsistente.
             // Sin salidas vivas se quedaria colgada para siempre; se cierra a mercado.
@@ -451,15 +464,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 SubmitExits();   // mantiene vivas SL y TP2 con el precio actual
                 return;
             }
-
-            // ---------- purgar zonas ----------
-            zones.RemoveAll(z =>
-            {
-                bool expired  = (CurrentBar - z.Born) > ZoneMaxAge;
-                bool consumed = z.Born != CurrentBar && z.Cleared &&
-                                ((z.Dir == 1 && Low[0] <= z.Top) || (z.Dir == -1 && High[0] >= z.Bot));
-                return expired || consumed;
-            });
 
             // ---------- sesion / frenos ----------
             int nyMin = nyNow.Hour * 60 + nyNow.Minute;
