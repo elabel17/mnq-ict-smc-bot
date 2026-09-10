@@ -248,13 +248,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Configure)
             {
-                AddDataSeries(BarsPeriodType.Minute, 60);   // solo para el sesgo opcional
+                // Solo se agrega la serie de 1H si el sesgo esta activado. Con una
+                // sola serie NinjaTrader permite 'Order Fill Resolution: High', que
+                // rellena las ordenes con datos de 1 minuto en vez de con el OHLC de
+                // la vela de 5m -- mucho mas fiel para las limites de esta estrategia.
+                if (Use1hBias)
+                    AddDataSeries(BarsPeriodType.Minute, 60);
                 rangeSeries = new Series<double>(this);
             }
             else if (State == State.DataLoaded)
             {
                 avgRange  = SMA(rangeSeries, DispLen);
-                bias1hSma = SMA(Closes[1], BiasSmaLen);
+                if (Use1hBias) bias1hSma = SMA(Closes[1], BiasSmaLen);
                 nyTz      = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
 
                 if (WriteCsvLog)
@@ -290,7 +295,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (BarsInProgress != 0) return;
             if (CurrentBars[0] < BarsRequiredToTrade) return;
-            if (Use1hBias && CurrentBars[1] < BiasSmaLen + 1) return;
+            if (Use1hBias && (CurrentBars.Length < 2 || CurrentBars[1] < BiasSmaLen + 1)) return;
 
             rangeSeries[0] = High[0] - Low[0];
             if (CurrentBars[0] < DispLen + 1) return;
