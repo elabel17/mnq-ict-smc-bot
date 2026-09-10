@@ -761,3 +761,70 @@ Advertencia ya comunicada al usuario: 6 temporadas es una muestra pequeña para 
 6. Discrepancia del grid de TP1 contra el motor JS de referencia de la otra sesión — nunca reconciliada (pendiente desde antes del 2026-09-08).
 7. Plan de escalamiento de contratos después de pasar la cuenta (¿5 contratos? ¿cuándo?) — no definido aún.
 8. NinjaScript (`ICT_OB_Strategy.cs`) para automatización — borrador sin testear, no tocado esta sesión.
+
+## ✅ SESIÓN 2026-09-10 — línea nueva: scalping nativo en 5 minutos
+
+A pedido del usuario, se buscó una parametrización propia para detección de Order Blocks directamente en velas de 5 minutos (no la lógica de 15m reaplicada — ya sabíamos que eso rinde peor, ver sección "5m+15m combinado" arriba). Metodología: búsqueda por etapas (greedy, análoga a la usada para recalibrar la sesión nocturna) + holdout 70% in-sample / 30% out-of-sample sobre el dataset de 5m (185.066 velas, 2024-01-28 a 2026-09-08, ~2.6 años — límite de profundidad del feed).
+
+### Parámetros encontrados (validados OOS)
+
+| Parámetro | Valor |
+|---|---|
+| DISP_LEN | 60 |
+| OB_SCAN_BARS | 10 |
+| DISP_MULT | 1.5 |
+| LIQ_ACCUM_BARS | 15 |
+| LIQ_TOLERANCE_PTS | 1.0 |
+| ENTRY_BUFFER_PTS | 8.0 |
+| SL_BUFFER_PTS | 0.5 |
+| TP2 (RR2) | 3.0R |
+| BE trigger | 0.6R |
+| BE lock | 0.5R |
+| Sesión | 03:00-11:00 NY (misma que la mejor franja de 15m) |
+| Filtro sesgo 1H | Sí (SMA 10 de 1H) |
+
+### Resultado (4 contratos, filtro 1H, histórico completo 2.6 años)
+
+Net $409.755 (supuestos originales: 1 tick slippage, $0.47/contrato/lado) / **$386.343 (supuestos conservadores: 2 ticks, $1.00/contrato/lado)**. Profit Factor ~3.0-3.2, winrate ~78%, ~3.752 operaciones (~5.6/día activo). Anualizado: ~$148.593/año en el escenario conservador, **5.7x el resultado anualizado de la versión de 15m** ($25.878/año con 4 contratos) — diferencia grande, tratada con escepticismo explícito, no como un hecho asumido.
+
+**Ningún mes del histórico (32 meses completos, feb-2024 a ago-2026) fue negativo** con esta configuración — señalado explícitamente al usuario como un patrón estadísticamente inusual que amerita más escepticismo, no menos, hasta confirmarse con trading real.
+
+### Auditoría de causalidad (el usuario pidió específicamente descartar el tipo de sesgo de "vela ya ocurrida" que se encontró y corrigió en 15m)
+
+1. **Código releído línea por línea**: la fórmula de entrada es idéntica a la ya validada para 15m — `e = z.top if l<=z.top else z.top+entry_buffer` — siempre un nivel fijo conocido de antemano, nunca el low/high real de la vela de señal.
+2. **SL/TP2 se disparan por mecha (high/low), nunca por cierre** — confirmado en código.
+3. **Ambigüedad SL/TP en la misma vela** (no se puede saber qué pasó primero con datos OHLC): ocurre en solo 1.22% de las pérdidas totales y 0.72% de los cierres en breakeven — y en el 100% de esos casos el motor asume el peor escenario (SL primero), nunca el más favorable. Si acaso, el resultado reportado está ligeramente subestimado por esta causa, nunca sobreestimado.
+4. **Verificación contra el feed REAL de TradingView** (no solo el dataset reconstruido): 3 operaciones verificadas en 3 fechas distintas del rango completo (2024-02-13, 2026-08-31, 2026-09-08) — coincidencia EXACTA de la vela completa (O/H/L/C) en las 3, incluyendo el caso más antiguo del dataset.
+5. **Verificación contra el script Pine real corriendo en vivo** (implementación independiente, no el mismo código Python): se extrajeron las etiquetas dibujadas por el script real y se encontró la misma operación (SHORT 2026-09-08 10:55 NY) con entrada/SL/TP2 EXACTAMENTE iguales al motor Python (29.562,75 / 29.590,00 / 29.481,00) — confirmación cruzada entre dos implementaciones independientes del mismo algoritmo.
+
+### Sensibilidad a supuestos de ejecución (para no inflar expectativas)
+
+- Slippage 1→5 ticks: net baja de $409.755 a $379.739 (-7.3%) — impacto menor al esperado porque en el modelo el slippage solo aplica en la salida (la entrada es orden límite sin deslizamiento, asumiendo que la orden ya estaba puesta).
+- Comisión $0.47→$3.00/contrato/lado: net baja de $409.755 a $333.815 (-18.5%) — más sensible, depende del bróker real del usuario (no confirmado).
+- **Impuestos: 0% modelado** — cifra reportada siempre es bruta, se le explicó al usuario que debe confirmar su situación fiscal para una cifra neta real.
+
+### Escenario para la cuenta de fondeo (límite de pérdida $2.000, objetivo $3.000 — el usuario confirmó estos números actualizados el 2026-09-10, reemplazan los $1.900/$3.000 usados en la sección de 15m)
+
+- **5 contratos es el máximo que cabe bajo $2.000 de drawdown** (DD histórico $1.765; con 6 contratos ya excede a $2.118).
+- Sep-Dic históricos (5 contratos): 2024 net $60.172 (DD de temporada $894), 2025 net $56.257 (DD de temporada $1.302). Promedio por temporada completa: **$58.214**.
+- Probabilidad de llegar a +$3.000 antes de -$2.000, usando solo el histórico real de sep-dic (bootstrap por bloques, 969 trades): 99.7%-100%, mediana de **25 operaciones** para alcanzar el objetivo — a un ritmo de ~27 trades/semana, **menos de 1 semana**. Advertencia explícita comunicada: esta probabilidad viene de remuestrear el mismo histórico (no es garantía independiente), y un ritmo tan alto exige automatización sin fallas desde el día 1.
+- Tras pasar el objetivo y levantarse el límite de DD, tamaños mayores ya calculados para cuando el usuario los necesite: 7 contratos → net $717.072 (DD $2.471), 10 contratos → net $1.024.389 (DD $3.530).
+
+### Entregables de esta sesión
+
+- `pine/ICT_5M_Scalp_v1.pine` — script real, ya corriendo en la cuenta de TradingView del usuario (agregado al chart, señales verificadas en vivo).
+- `pine/automation/ICT_5M_Scalp_Strategy.cs` — NinjaScript, **primer borrador SIN TESTEAR/COMPILAR** (sin acceso a NinjaTrader desde aquí). Un solo régimen (a diferencia del v18 de 15m que tiene manana/noche), entrada por orden límite al precio causal, mismo fix de "no gestionar en la misma vela de entrada".
+- `data/engine/python/claude_engine5.py` — motor de referencia (detección + TP/BE totalmente parametrizados, apuntado por defecto al dataset de 5m).
+- `data/python/claude_september_2026_mtd_5m.json` y `claude_september_2026_mtd_trades.csv` — velas reales de septiembre 2026 (1-10) extraídas en vivo, y las 47 operaciones esperadas de ese período, para que el usuario valide vía replay en NinjaTrader en su computadora personal.
+
+### ⚠️ Incidente de herramienta — aviso de identidad de script (actualizado)
+
+Durante la creación del script de scalping, el mismo bug de la herramienta de edición de Pine (ya documentado en la sección anterior) causó que el código terminara guardado, en distintos intentos, sobre **dos indicadores ajenos del usuario**: primero "Ultimate" (LuxAlgo SMC/ICT Setup Engine v15.0) quedó con el v18 de 15m (con autorización expresa del usuario, "me da igual"), y luego **"Apoyo" (Smart Money Concepts [LuxAlgo] - Ajustado) quedó con el ICT 5M Scalp v1** (también con autorización expresa). Ningún script propio del proyecto (v18 en su ubicación original, "el mio" v15/v16, ni el histórico) se perdió. El código real del scalping vive ahora en el script de TradingView llamado internamente "Apoyo".
+
+### Pendiente para retomar
+
+1. Usuario debe compilar el NinjaScript en su NinjaTrader (nunca compilado, podría tener errores de sintaxis no detectados sin acceso al IDE real).
+2. Replay de 1-2 semanas comparando contra `claude_september_2026_mtd_trades.csv` (criterio sugerido: ≥95% de las 47 señales deben coincidir en precio ±1-2 ticks, dirección y hora, sin falsos positivos) antes de considerar Sim o cuenta real.
+3. Confirmar comisión/slippage reales del bróker del usuario para recalcular la cifra neta exacta.
+4. Situación fiscal del usuario (país: República Dominicana, según conversación) — pendiente de que consulte con un contador/asesor fiscal local antes de mover ganancias grandes; no es algo que este análisis pueda resolver.
+5. Ordenar eventualmente los nombres de script duplicados/confundidos en la cuenta de TradingView del usuario (no urgente, todo funciona, es solo higiene).
