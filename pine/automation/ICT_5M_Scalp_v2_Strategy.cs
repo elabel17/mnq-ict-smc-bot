@@ -297,6 +297,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             int    q  = Position.Quantity;
             double sl = Instrument.MasterInstrument.RoundToTickSize(activeStop);
             double tp = Instrument.MasterInstrument.RoundToTickSize(targetPx);
+
+            // Un stop de venta tiene que estar POR DEBAJO del mercado (y al reves
+            // para el de compra). Al mover a +LockR con Calculate.OnBarClose puede
+            // pasar que el maximo de la vela llegara al gatillo pero el cierre ya
+            // volviera por debajo del nivel asegurado: el broker rechaza la orden.
+            // El backtest, en ese caso, da por ejecutado el stop en el nivel; lo
+            // mas parecido en real es salir a mercado ahora y medir la diferencia.
+            double ref0 = Close[0];
+            bool imposible = (plannedDir == 1 && sl >= ref0) || (plannedDir == -1 && sl <= ref0);
+            if (imposible)
+            {
+                Log("STOP_INALCANZABLE", plannedDir == 1 ? "LONG" : "SHORT", ref0, sl, riskPts, 0,
+                    "stop del lado equivocado del mercado, salida a mercado; diferencia "
+                    + (Math.Abs(ref0 - sl)).ToString("F2", INV) + " pts");
+                if (plannedDir == 1) ExitLong("STOPX", "ICT5-L"); else ExitShort("STOPX", "ICT5-S");
+                return;
+            }
             if (plannedDir == 1)
             {
                 ExitLongStopMarket(0, true, q, sl, "SL", "ICT5-L");
