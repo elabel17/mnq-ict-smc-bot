@@ -37,7 +37,7 @@ using NinjaTrader.NinjaScript.Strategies;
 //    se deja puesta mientras el precio todavia no ha llegado, que es lo que
 //    el backtest asume.
 //
-// 3) SL Y TP2 SON ORDENES REALES (SetStopLoss / SetProfitTarget).
+// 3) SL Y TP2 SON ORDENES REALES (Exit*StopMarket / Exit*Limit).
 //    v1 solo comprobaba `h >= tp2` al cierre y salia a mercado -> salias al
 //    cierre de la vela, no en el TP2. Con TP2 = 3R sobre un riesgo medio de
 //    ~29 pts (87 puntos de objetivo) esa diferencia es grande.
@@ -157,7 +157,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Series<double> rangeSeries;
         private TimeZoneInfo nyTz;
 
-        private double fillPrice, riskPts, activeStop, plannedStop;
+        private double fillPrice, riskPts, activeStop, plannedStop, targetPx;
         private int    plannedDir, entryBar = -1;
         private bool   beMoved, inPosition;
 
@@ -283,6 +283,29 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        // Salidas como ordenes explicitas en vez de SetStopLoss/SetProfitTarget.
+        // Los metodos Set* regeneran el par OCO cada vez que se les cambia el
+        // precio, y NinjaTrader rechaza el reenvio con "OCO ID cannot be reused".
+        // Reenviar Exit*StopMarket / Exit*Limit con el MISMO nombre de senal
+        // modifica la orden existente en lugar de crear otra.
+        private void SubmitExits()
+        {
+            if (Position.MarketPosition == MarketPosition.Flat) return;
+            int    q  = Position.Quantity;
+            double sl = Instrument.MasterInstrument.RoundToTickSize(activeStop);
+            double tp = Instrument.MasterInstrument.RoundToTickSize(targetPx);
+            if (plannedDir == 1)
+            {
+                ExitLongStopMarket(0, true, q, sl, "SL", "ICT5-L");
+                ExitLongLimit     (0, true, q, tp, "TP", "ICT5-L");
+            }
+            else
+            {
+                ExitShortStopMarket(0, true, q, sl, "SL", "ICT5-S");
+                ExitShortLimit     (0, true, q, tp, "TP", "ICT5-S");
+            }
+        }
+
         private DateTime NyTime(DateTime barTime)
         {
             // Globals vive en NinjaTrader.Core; hay que calificarlo entero porque
@@ -387,12 +410,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                         activeStop = plannedDir == 1
                             ? fillPrice + riskPts * LockR
                             : fillPrice - riskPts * LockR;
-                        SetStopLoss(CalculationMode.Price, Instrument.MasterInstrument.RoundToTickSize(activeStop));
                         Print(Time[0] + "  BE -> stop " + activeStop.ToString("F2"));
                         Log("BE_MOVE", plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, 0,
                             "alcanzo " + BeTriggerR.ToString("F2", INV) + "R, asegura " + LockR.ToString("F2", INV) + "R");
                     }
                 }
+                SubmitExits();   // mantiene vivas SL y TP2 con el precio actual
                 return;
             }
 
@@ -507,9 +530,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 double target = plannedDir == 1
                     ? fillPrice + riskPts * RR2
                     : fillPrice - riskPts * RR2;
+                targetPx = target;
 
-                SetStopLoss(CalculationMode.Price,   Instrument.MasterInstrument.RoundToTickSize(activeStop));
-                SetProfitTarget(CalculationMode.Price, Instrument.MasterInstrument.RoundToTickSize(target));
+                SubmitExits();
 
                 Print(string.Format("{0}  ENTRADA {1} fill={2:F2} stop={3:F2} riesgo={4:F2}pts TP2={5:F2}",
                     Time[0], plannedDir == 1 ? "LONG" : "SHORT", fillPrice, activeStop, riskPts, target));
