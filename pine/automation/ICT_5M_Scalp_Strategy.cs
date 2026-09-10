@@ -52,6 +52,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using NinjaTrader.Cbi;
+using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.Strategies;
 #endregion

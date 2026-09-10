@@ -43,6 +43,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using NinjaTrader.Cbi;
+using NinjaTrader.Data;
 using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.Strategies;
