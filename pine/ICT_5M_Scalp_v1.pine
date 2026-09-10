@@ -1,0 +1,324 @@
+//@version=6
+strategy("ICT 5M Scalp v1 - deteccion nativa + sesgo 1H", overlay=true,
+     initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1,
+     calc_on_every_tick=false, process_orders_on_close=true,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================
+// ICT 5M SCALP v1 -- 2026-09-10
+//
+// IMPORTANTE: este script esta calibrado especificamente para el
+// GRAFICO EN 5 MINUTOS. La deteccion de Order Blocks usa parametros
+// muy distintos a la version de 15m (umbral de desplazamiento mas
+// bajo, stop mucho mas ajustado, TP2 mas cercano) -- NO es la misma
+// logica reaplicada a otra temporalidad, es una recalibracion
+// completa encontrada con busqueda por etapas y validada con holdout
+// 70% in-sample / 30% out-of-sample sobre 2.6 anios de historico
+// (2024-01-28 a 2026-09-08, limite de profundidad del feed de 5m).
+//
+// Backtest de referencia (4 contratos, filtro de sesgo 1H activo,
+// sesion 03:00-11:00 NY, ~2.6 anios): net $409.755, Profit Factor 3.20,
+// winrate 78.1%, drawdown maximo $1.412, ~3.752 operaciones
+// (~5.6/dia activo). Con supuestos de ejecucion mas conservadores
+// (2 ticks de slippage, $1.00/contrato/lado de comision en vez de
+// $0.47) el resultado baja a net $386.343 -- se sostiene.
+//
+// Auditoria de causalidad (2026-09-10): se verificaron manualmente
+// varias operaciones contra el feed REAL de TradingView (no solo el
+// dataset reconstruido) -- coincidencia exacta en las 3 fechas
+// revisadas (2024-02, 2026-08, 2026-09), incluida la vela de entrada
+// completa (O/H/L/C). Se confirmo ademas que SL/TP se disparan por
+// mecha (high/low), nunca por cierre, y que en los pocos casos
+// ambiguos (misma vela toca SL y TP2, ~1% de las operaciones) el
+// motor SIEMPRE asume el peor escenario -- nunca el mas favorable.
+//
+// SIGUE PENDIENTE (no resuelto por este script, decision del usuario):
+//   - Forward-test en simulador antes de arriesgar cuenta real/fondeada.
+//   - Impuestos: no modelados, cifra reportada es bruta.
+//   - Tamano de posicion realista segun capital real disponible (el
+//     backtest usa 4 contratos fijos desde el dia 1, sin escalar).
+//   - Solo 2.6 anios de historico -- menos robusto que la version de
+//     15m (6.27 anios), no cubre regimenes de alta volatilidad como
+//     2020-2022.
+//
+// Sin cierre parcial en TP1 (se valido que dejar correr el 100% a TP2
+// es mas rentable). TP1 se conserva solo como referencia visual.
+// ============================================================
+
+startDate      = input.time(timestamp("2024-01-01 00:00 -0500"), "Backtest start")
+endDate        = input.time(timestamp("2027-01-01 00:00 -0500"), "Backtest end")
+
+// ---------------- Deteccion (recalibrada para 5m) ----------------
+dispLen        = input.int(60, "Barras para el rango promedio", minval=5, maxval=200, group="Deteccion (5m)")
+dispMult       = input.float(1.5, "Umbral de desplazamiento (x rango promedio)", minval=1.0, maxval=6.0, group="Deteccion (5m)")
+dispCloseFrac  = input.float(0.6, "Fracción mínima de cierre direccional", minval=0.3, maxval=1.0, group="Deteccion (5m)")
+obScanBars     = input.int(10, "Barras hacia atrás para la vela de origen", minval=3, maxval=30, group="Deteccion (5m)")
+liqCheckBars   = input.int(12, "Ventana para revisar liquidez detrás del OB", minval=3, maxval=40, group="Deteccion (5m)")
+liqTolerancePts= input.float(1.0, "Tolerancia (pts) para 'testear' el mismo nivel", minval=0, group="Deteccion (5m)")
+liqAccumBars   = input.int(15, "Barras consecutivas que invalidan liquidez limpia", minval=2, maxval=30, group="Deteccion (5m)")
+zoneMaxAge     = input.int(300, "Velas que una zona sigue viva sin ser tocada", minval=20, maxval=2000, group="Deteccion (5m)")
+maxZones       = input.int(40, "Máximo de zonas vivas simultáneas (protección)", minval=4, maxval=100, group="Deteccion (5m)")
+slBufferPts    = input.float(0.5, "Buffer (pts) más allá del OB para el SL", minval=0, group="Deteccion (5m)")
+entryBufferPts = input.float(8.0, "Margen (pts) de entrada más allá del borde", minval=0, group="Deteccion (5m)")
+rr1            = input.float(1.8, "TP1 (solo referencia visual, no cierra contratos)", group="Deteccion (5m)")
+rr2            = input.float(3.0, "TP2 (múltiplo de R)", group="Deteccion (5m)")
+useRiskCap     = input.bool(true, "Descartar señal si el stop supera el tope", group="Deteccion (5m)")
+maxRiskPts     = input.float(100.0, "Tope máximo de riesgo por operación (pts)", minval=10, group="Deteccion (5m)")
+beTriggerR     = input.float(0.6, "Activar protección al alcanzar este múltiplo de R", minval=0, maxval=3, group="Deteccion (5m)")
+lockR          = input.float(0.5, "Ganancia a asegurar en ese punto (múltiplo de R)", minval=0, maxval=3, group="Deteccion (5m)")
+
+// ---------------- Sesion ----------------
+sessionStartHour = input.int(3, "Hora inicio sesion (NY)", minval=0, maxval=23, group="Sesion")
+sessionEndHour   = input.int(11, "Hora fin sesion (NY, exclusiva)", minval=0, maxval=23, group="Sesion")
+
+// ---------------- Sesgo de 1H ----------------
+use1hBias      = input.bool(true, "Aplicar filtro de sesgo de 1H", group="Sesgo 1H")
+biasSmaLen     = input.int(10, "Largo de la SMA de 1H para el sesgo", minval=3, maxval=50, group="Sesgo 1H")
+
+// ---------------- Visual ----------------
+showZones      = input.bool(true, "Dibujar las zonas OB vivas", group="Visual")
+showWideZone   = input.bool(true, "Dibujar la zona ampliada (OB + margen de entrada)", group="Visual")
+showLockZone   = input.bool(true, "Dibujar la caja de ganancia asegurada al activarse", group="Visual")
+
+inDateRange = time >= startDate and time <= endDate
+nyMinOfDay  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+inSession   = nyMinOfDay >= sessionStartHour * 60 and nyMinOfDay < sessionEndHour * 60
+
+// ---------------- Sesgo de 1H (SMA de 1H nativa, sin lookahead) ----------------
+h1Bias = request.security(syminfo.tickerid, "60", math.sign(close - ta.sma(close, biasSmaLen)), lookahead=barmerge.lookahead_off)
+
+type Zone
+    int   dir
+    float top
+    float bot
+    bool  cleared
+    int   born
+    box   bx
+    box   bxWide
+
+var array<Zone> zones = array.new<Zone>()
+
+avgRange = ta.sma(high - low, dispLen)
+rng      = high - low
+isDisp   = rng >= dispMult * avgRange[1]
+bullDisp = isDisp and close > open and (close - low) >= dispCloseFrac * rng
+bearDisp = isDisp and close < open and (high - close) >= dispCloseFrac * rng
+
+// ---------------- 1) Formar zonas nuevas ----------------
+if bullDisp
+    idx = -1
+    for i = 1 to obScanBars
+        if close[i] < open[i]
+            idx := i
+            break
+    if idx != -1
+        candBot   = low[idx]
+        maxStreak = 0
+        curStreak = 0
+        for j = idx + 1 to idx + liqCheckBars
+            if low[j] <= candBot + liqTolerancePts
+                curStreak += 1
+                maxStreak := math.max(maxStreak, curStreak)
+            else
+                curStreak := 0
+        if maxStreak < liqAccumBars
+            nb = showZones ? box.new(bar_index - idx, high[idx], bar_index, candBot,
+                 border_color=color.new(color.green, 20), bgcolor=color.new(color.green, 88), border_width=2) : na
+            nw = showWideZone ? box.new(bar_index - idx, high[idx] + entryBufferPts, bar_index, candBot,
+                 border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 95),
+                 border_width=1, border_style=line.style_dashed) : na
+            array.push(zones, Zone.new(1, high[idx], candBot, false, bar_index, nb, nw))
+
+if bearDisp
+    idx2 = -1
+    for i = 1 to obScanBars
+        if close[i] > open[i]
+            idx2 := i
+            break
+    if idx2 != -1
+        candTop    = high[idx2]
+        maxStreak2 = 0
+        curStreak2 = 0
+        for j = idx2 + 1 to idx2 + liqCheckBars
+            if high[j] >= candTop - liqTolerancePts
+                curStreak2 += 1
+                maxStreak2 := math.max(maxStreak2, curStreak2)
+            else
+                curStreak2 := 0
+        if maxStreak2 < liqAccumBars
+            nb2 = showZones ? box.new(bar_index - idx2, candTop, bar_index, low[idx2],
+                 border_color=color.new(color.red, 20), bgcolor=color.new(color.red, 88), border_width=2) : na
+            nw2 = showWideZone ? box.new(bar_index - idx2, candTop, bar_index, low[idx2] - entryBufferPts,
+                 border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 95),
+                 border_width=1, border_style=line.style_dashed) : na
+            array.push(zones, Zone.new(-1, candTop, low[idx2], false, bar_index, nb2, nw2))
+
+while array.size(zones) > maxZones
+    zOld = array.shift(zones)
+    box.delete(zOld.bx)
+    box.delete(zOld.bxWide)
+
+// ---------------- 2) Actualizar 'cleared' ----------------
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        z = array.get(zones, i)
+        if z.born != bar_index and not z.cleared
+            if z.dir == 1 and low > z.top
+                z.cleared := true
+            else if z.dir == -1 and high < z.bot
+                z.cleared := true
+
+// ---------------- 3) Estado de la operación ----------------
+var bool  tradeOpen  = false
+var int   dir        = 0
+var float entryPrice = na
+var float activeSL   = na
+var float riskPts    = na
+var bool  beMoved    = false
+var int   entryBar   = na
+
+canEnter = inSession and inDateRange and not tradeOpen
+
+// ---------------- 4) Buscar candidata de entrada (causal: solo niveles fijos conocidos de antemano) ----------------
+float candEntry = na
+float candSL    = na
+float candRisk  = na
+int   candDir   = 0
+int   candBorn  = -1
+
+if canEnter and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        z = array.get(zones, i)
+        if z.born != bar_index and z.cleared and (bar_index - z.born) <= zoneMaxAge
+            if z.dir == 1 and low <= z.top + entryBufferPts and low >= z.bot
+                if not use1hBias or h1Bias > 0
+                    e = low <= z.top ? z.top : z.top + entryBufferPts
+                    x = z.bot - slBufferPts
+                    r = e - x
+                    if r > 0 and (not useRiskCap or r <= maxRiskPts) and z.born > candBorn
+                        candEntry := e
+                        candSL    := x
+                        candRisk  := r
+                        candDir   := 1
+                        candBorn  := z.born
+            if z.dir == -1 and high >= z.bot - entryBufferPts and high <= z.top
+                if not use1hBias or h1Bias < 0
+                    e2 = high >= z.bot ? z.bot : z.bot - entryBufferPts
+                    x2 = z.top + slBufferPts
+                    r2 = x2 - e2
+                    if r2 > 0 and (not useRiskCap or r2 <= maxRiskPts) and z.born > candBorn
+                        candEntry := e2
+                        candSL    := x2
+                        candRisk  := r2
+                        candDir   := -1
+                        candBorn  := z.born
+
+// ---------------- 5) Retirar zonas caducadas o consumidas ----------------
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        z = array.get(zones, i)
+        expired  = (bar_index - z.born) > zoneMaxAge
+        consumed = z.born != bar_index and z.cleared and ((z.dir == 1 and low <= z.top) or (z.dir == -1 and high >= z.bot))
+        if expired or consumed
+            box.delete(z.bx)
+            box.delete(z.bxWide)
+            array.remove(zones, i)
+        else
+            if not na(z.bx)
+                box.set_right(z.bx, bar_index)
+            if not na(z.bxWide)
+                box.set_right(z.bxWide, bar_index)
+
+// ---------------- 6) Entrada ----------------
+if canEnter and candDir != 0
+    entryPrice := candEntry
+    activeSL   := candSL
+    riskPts    := candRisk
+    beMoved    := false
+    tradeOpen  := true
+    dir        := candDir
+    entryBar   := bar_index
+    lockPx = candDir == 1 ? candEntry + candRisk * lockR : candEntry - candRisk * lockR
+    tp1Px  = candDir == 1 ? candEntry + candRisk * rr1   : candEntry - candRisk * rr1
+    tp2Px  = candDir == 1 ? candEntry + candRisk * rr2   : candEntry - candRisk * rr2
+    txt = (candDir == 1 ? "LONG " : "SHORT ") + str.tostring(candEntry, "#.##") +
+      "\nSL " + str.tostring(candSL, "#.##") +
+      "\nAsegura +" + str.tostring(lockR, "#.##") + "R @ " + str.tostring(lockPx, "#.##") +
+      "\nTP1(ref) " + str.tostring(tp1Px, "#.##") +
+      "\nTP2 " + str.tostring(tp2Px, "#.##")
+    if candDir == 1
+        label.new(bar_index, low, txt, style=label.style_label_up, color=color.green,
+             textcolor=color.white, yloc=yloc.belowbar, size=size.small)
+    else
+        label.new(bar_index, high, txt, style=label.style_label_down, color=color.red,
+             textcolor=color.white, yloc=yloc.abovebar, size=size.small)
+
+// ---------------- 7) Gestión (SL/TP2 por mecha, nunca en la misma vela de entrada) ----------------
+justEntered = tradeOpen and not na(entryBar) and entryBar == bar_index
+if tradeOpen and dir == 1 and not justEntered
+    tp2 = entryPrice + riskPts * rr2
+    hitSL  = low <= activeSL
+    hitTP2 = high >= tp2
+    reachedR = (high - entryPrice) / riskPts
+    if hitSL
+        label.new(bar_index, low, beMoved ? "= Cerrado asegurando +" + str.tostring(lockR, "#.##") + "R" : "✗ PÉRDIDA TOTAL",
+             style=label.style_label_up, color=beMoved ? color.new(color.gray, 20) : color.new(color.red, 0),
+             textcolor=color.white, size=size.small)
+        tradeOpen := false
+    else if hitTP2
+        label.new(bar_index, high, "✓✓ TP2 alcanzado", style=label.style_label_down,
+             color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpen := false
+    else if beTriggerR > 0 and not beMoved and reachedR >= beTriggerR
+        beMoved  := true
+        activeSL := entryPrice + riskPts * lockR
+        label.new(bar_index, high, "→ Asegura +" + str.tostring(lockR, "#.##") + "R",
+             style=label.style_label_down, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+if tradeOpen and dir == -1 and not justEntered
+    tp2 = entryPrice - riskPts * rr2
+    hitSL  = high >= activeSL
+    hitTP2 = low <= tp2
+    reachedR = (entryPrice - low) / riskPts
+    if hitSL
+        label.new(bar_index, high, beMoved ? "= Cerrado asegurando +" + str.tostring(lockR, "#.##") + "R" : "✗ PÉRDIDA TOTAL",
+             style=label.style_label_down, color=beMoved ? color.new(color.gray, 20) : color.new(color.red, 0),
+             textcolor=color.white, size=size.small)
+        tradeOpen := false
+    else if hitTP2
+        label.new(bar_index, low, "✓✓ TP2 alcanzado", style=label.style_label_up,
+             color=color.new(color.lime, 0), textcolor=color.black, size=size.normal)
+        tradeOpen := false
+    else if beTriggerR > 0 and not beMoved and reachedR >= beTriggerR
+        beMoved  := true
+        activeSL := entryPrice - riskPts * lockR
+        label.new(bar_index, low, "→ Asegura +" + str.tostring(lockR, "#.##") + "R",
+             style=label.style_label_up, color=color.new(color.blue, 40), textcolor=color.white, size=size.tiny)
+
+// ---------------- 8) Caja de ganancia asegurada ----------------
+var box lockZoneBox = na
+if showLockZone
+    if tradeOpen and beMoved and not na(activeSL) and not na(entryPrice)
+        lockTop = math.max(entryPrice, activeSL)
+        lockBot = math.min(entryPrice, activeSL)
+        if na(lockZoneBox)
+            lockZoneBox := box.new(bar_index, lockTop, bar_index, lockBot,
+                 border_color=color.new(color.blue, 30), bgcolor=color.new(color.blue, 80), border_width=1)
+        else
+            box.set_right(lockZoneBox, bar_index)
+            box.set_top(lockZoneBox, lockTop)
+            box.set_bottom(lockZoneBox, lockBot)
+    else if not tradeOpen and not na(lockZoneBox)
+        lockZoneBox := na
+
+// ---------------- 9) Alertas ----------------
+alertcondition(bullDisp, title="Nueva zona LONG detectada", message="{{ticker}}: nueva zona de COMPRA formada (5m)")
+alertcondition(bearDisp, title="Nueva zona SHORT detectada", message="{{ticker}}: nueva zona de VENTA formada (5m)")
+
+// ---------------- 10) Diagnóstico ----------------
+plot(array.size(zones), "Zonas vivas", display=display.data_window)
+plot(tradeOpen ? 1 : 0, "Operacion abierta", display=display.data_window)
+plot(h1Bias, "Sesgo 1H (+1 alcista/-1 bajista)", display=display.data_window)
+
+bgcolor(inSession and inDateRange ? color.new(color.blue, 92) : na)

@@ -1,0 +1,12 @@
+{
+  "disp_len": 60,
+  "ob_scan_bars": 10,
+  "disp_mult": 1.5,
+  "liq_accum_bars": 15,
+  "liq_tolerance_pts": 1.0,
+  "entry_buffer_pts": 8.0,
+  "sl_buffer_pts": 0.5,
+  "rr2": 3.0,
+  "be_trigger_r": 0.6,
+  "lock_r": 0.5
+}
