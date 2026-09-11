@@ -252,7 +252,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 BarsRequiredToTrade          = 80;
                 IsInstantiatedOnEachOptimizationIteration = false;
 
-                Qty = 3;  EntryAtBufferEdge = true;
+                // 4 contratos: DD historico $2.493, 96,6% de probabilidad de
+                // +$3.000 antes de -$2.000, mediana 5 semanas. Con 3 seria
+                // DD $1.870 y 100%, pero 7 semanas.
+                Qty = 4;  EntryAtBufferEdge = true;
                 // A CERO por defecto: los frenos falsean cualquier comparacion
                 // contra el motor, que no los tiene. Valores para operar en real:
                 // diaria 800, total 1700, objetivo 3000.
