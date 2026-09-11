@@ -132,6 +132,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty] [Display(Name="Hora fin (NY, exclusiva)", Order=2, GroupName="5. Sesion")]
         public int SessionEndHour { get; set; }
 
+        [NinjaScriptProperty] [Display(Name="Usar 2a sesion", Order=3, GroupName="5. Sesion")]
+        public bool UseSession2 { get; set; }
+        [NinjaScriptProperty] [Display(Name="2a sesion: hora inicio (NY)", Order=4, GroupName="5. Sesion")]
+        public int Session2StartHour { get; set; }
+        [NinjaScriptProperty] [Display(Name="2a sesion: hora fin (NY, exclusiva)", Order=5, GroupName="5. Sesion")]
+        public int Session2EndHour { get; set; }
+
         // ---------------- Sesgo 1H (apagado: ver cabecera) ----------------
         [NinjaScriptProperty] [Display(Name="Aplicar sesgo de 1H (no recomendado, ver cabecera)", Order=1, GroupName="6. Sesgo 1H")]
         public bool Use1hBias { get; set; }
@@ -251,14 +258,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // diaria 800, total 1700, objetivo 3000.
                 DailyLossLimit = 0;  TotalLossLimit = 0;  ProfitTargetStop = 0;
 
-                DispLen = 60; DispMult = 1.5; DispCloseFrac = 0.6; ObScanBars = 10;
+                DispLen = 60; DispMult = 2.0; DispCloseFrac = 0.6; ObScanBars = 10;
                 LiqCheckBars = 12; LiqTolerancePts = 1.0; LiqAccumBars = 15;
-                ZoneMaxAge = 300; MaxZones = 40;
+                // FRESCURA: solo se opera la zona si el precio vuelve dentro de las
+                // 3 primeras velas. Es el filtro de mayor impacto de todo el estudio
+                // (PF 1.47 -> 1.92, drawdown $3.771 -> $1.870 con 3 contratos).
+                // Poner 60 para la variante de maximo neto (PF 1.47, mas dinero).
+                ZoneMaxAge = 3; MaxZones = 40;
                 SlBufferPts = 0.5; EntryBufferPts = 8.0;
                 UseRiskCap = true; MaxRiskPts = 100.0;
 
-                RR2 = 3.0; BeTriggerR = 0.6; LockR = 0.5;
-                SessionStartHour = 3; SessionEndHour = 11;
+                // LockR TIENE que ser menor que BeTriggerR: al reves el stop queda
+                // por encima del precio y el broker lo rechaza.
+                RR2 = 5.0; BeTriggerR = 0.6; LockR = 0.5;
+                SessionStartHour = 9; SessionEndHour = 11;          // apertura de Nueva York
+                UseSession2 = true;
+                Session2StartHour = 2; Session2EndHour = 6;          // Londres
 
                 Use1hBias = false; BiasSmaLen = 10;
 
@@ -521,7 +536,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             // ---------- sesion / frenos ----------
             int nyMin = nyNow.Hour * 60 + nyNow.Minute;
-            bool inSession = nyMin >= SessionStartHour * 60 && nyMin < SessionEndHour * 60;
+            bool inSession = (nyMin >= SessionStartHour * 60 && nyMin < SessionEndHour * 60)
+                          || (UseSession2 && nyMin >= Session2StartHour * 60
+                                          && nyMin < Session2EndHour * 60);
             if (haltToday || haltTotal || !inSession || Position.MarketPosition != MarketPosition.Flat)
             { CancelPending(); return; }
 
