@@ -5,52 +5,49 @@ futures, `CME_MINI_DL:MNQ1!`), backtesteada con un servidor MCP a medida
 (TradingView Desktop controlado vía CDP). Regla no negociable en todo el
 proyecto: **ningún backtest usa información futura del precio**.
 
-## Estado (actualizado 2026-09-10)
+## Estado (actualizado 2026-09-10, tarde)
 
-- **DOS líneas de estrategia activas en paralelo:**
-  1. **15m (mañana/noche + sesgo 1H):** `pine/ICT_15M_OB_Entry_v18.pine`.
-     Número de referencia (3 contratos, histórico completo 6.27 años):
-     Net $121.696, PF 3.08, Winrate 67.9%, Max DD $1.598.
-  2. **5m scalping nativo (NUEVO, 2026-09-10):** `pine/ICT_5M_Scalp_v1.pine`
-     — parámetros de detección recalibrados específicamente para 5 minutos
-     (no es la lógica de 15m reaplicada), filtro de sesgo 1H, sesión
-     03:00-11:00 NY únicamente. Número de referencia (4 contratos,
-     histórico completo 2.6 años, supuestos conservadores de ejecución):
-     **Net $386.343, PF ~3.2, Winrate ~78%, Max DD ~$1.500**. Auditado a
-     fondo por causalidad y verificado contra el feed real de TradingView
-     y contra el script Pine corriendo en vivo (coincidencia exacta).
-     NinjaScript: `pine/automation/ICT_5M_Scalp_Strategy.cs` (primer
-     borrador, SIN COMPILAR — pendiente de que el usuario lo pruebe en su
-     NinjaTrader).
-  Ver el detalle completo, metodología y advertencias de ambas en
-  `docs/CLAUDE_SESSION_2026-09-08.md` (secciones "SESIÓN 2026-09-09" y
-  "SESIÓN 2026-09-10").
-  **⚠️ Aviso de identidad de scripts en TradingView:** por un bug
-  reproducible de la herramienta de edición usada, el código real terminó
-  guardado bajo nombres de scripts preexistentes del usuario en su cuenta
-  de TradingView, no bajo los nombres "originales": v18 (15m) vive en
-  "Ultimate", y el scalping de 5m vive en "Apoyo" — ambos casos con
-  autorización expresa del usuario tras confirmarle el problema. Ningún
-  script propio del proyecto se perdió. Detalle completo en
-  `docs/CLAUDE_SESSION_2026-09-08.md`.
-  `pine/ICT_15M_OB_Entry_v15.pine`, `v14.pine` y `ICT_15M_OB_Alertas.pine`
-  son versiones anteriores de 15m, conservadas de referencia.
-- **Motores Python de referencia:** `claude_engine.py` (15m, validado
-  causal), `claude_engine2/3/4.py` (generalizan TP/BE, parámetros de
-  detección, y diagnóstico por trade), `claude_engine5.py` (motor nativo
-  de 5m), `claude_session_config.py` (regímenes mañana/noche de 15m).
-  Cualquier cifra anterior a 2026-09-09 (105k, 152k, 214k, 168k para 15m)
-  queda obsoleta.
-- **Datos de validación en vivo:** `data/python/claude_september_2026_mtd_5m.json`
-  y `claude_september_2026_mtd_trades.csv` — velas reales y las 47
-  operaciones esperadas de septiembre 2026 (1-10), para que el usuario
-  valide el NinjaScript vía replay antes de Sim/cuenta real.
-- Cualquier análisis o ajuste nuevo se hace en un script/indicador aparte y se
-  documenta en `docs/`.
-- **Para poner al día una sesión de Claude nueva/otra PC:** leer primero
-  `docs/CLAUDE_SESSION_2026-09-08.md` completo (bitácora cronológica de
-  todos los hallazgos y fixes, hasta la sección "SESIÓN 2026-09-10" al
-  final) antes de tocar cualquier script o motor.
+> **AVISO — las cifras anteriores de este README eran inválidas.**
+> Al portar la estrategia a NinjaTrader se encontraron **cinco look-aheads**
+> en el motor de Python. Los $386.343 y los $290.250 que figuraban aquí
+> describían operaciones imposibles de ejecutar. Detalle completo en
+> [config/ANALISIS_CAUSAL.md](config/ANALISIS_CAUSAL.md).
+
+### 5m — configuración validada causalmente
+
+Motor de referencia: `data/engine/python/v_nivel.py` (modo `aire`).
+Reprodujo **exactamente las 83 operaciones** del replay de NinjaTrader
+del 27-ago al 8-sep de 2026.
+
+| configuración | ops | PF | neto 2,61a (3c) | DD (3c) | mitades |
+|---|---|---|---|---|---|
+| **A · pasar la cuenta** (frescura ≤3) | 1.054 | **1.92** | $59.150 | **$1.870** | 1.87 / 1.98 |
+| B · máximo neto (sin frescura) | 2.897 | 1.47 | $91.882 | $3.771 | 1.48 / 1.45 |
+
+Parámetros completos y tablas por número de contratos en
+[config/CONFIGURACIONES.md](config/CONFIGURACIONES.md).
+
+**En uso: configuración A con 4 contratos** — DD $2.493, 96,6% de
+probabilidad de +$3.000 antes de −$2.000, mediana 5 semanas. Últimos 12
+meses: PF 2.27, $43.295, cero meses negativos.
+
+El hallazgo decisivo fue la **frescura de zona**: si el precio vuelve al
+Order Block dentro de las 3 primeras velas de 5m la reacción es fiable
+(PF 1.92); a partir de la vela 8 cae a 1.5. El `zone_max_age = 60` heredado
+permitía operar zonas de hasta cinco horas.
+
+### 15m — SIN AUDITAR
+
+`pine/ICT_15M_OB_Entry_v18.pine` reportaba Net $121.696 / PF 3.08. **Ese
+número no ha pasado por la auditoría de causalidad** que se aplicó al de 5m
+y no debe usarse hasta revisarlo. Es trabajo pendiente.
+
+### Herramientas
+
+- `tools/compilar.ps1` — compila el NinjaScript contra los ensamblados
+  reales de NT8. Ningún archivo se copia a NinjaTrader sin pasar por aquí.
+- `pine/automation/ICT_5M_Scalp_v2_Strategy.cs` — estrategia de NT8 con
+  registro CSV por evento en `Documents/NinjaTrader 8/export/`.
 
 ## Contenido
 
