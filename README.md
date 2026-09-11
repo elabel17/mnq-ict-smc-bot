@@ -5,36 +5,21 @@ futures, `CME_MINI_DL:MNQ1!`), backtesteada con un servidor MCP a medida
 (TradingView Desktop controlado vía CDP). Regla no negociable en todo el
 proyecto: **ningún backtest usa información futura del precio**.
 
-## Estado (actualizado 2026-09-10, tarde)
+## Estado (actualizado 2026-09-10, noche)
 
-> **AVISO — las cifras anteriores de este README eran inválidas.**
-> Al portar la estrategia a NinjaTrader se encontraron **cinco look-aheads**
-> en el motor de Python. Los $386.343 y los $290.250 que figuraban aquí
-> describían operaciones imposibles de ejecutar. Detalle completo en
-> [config/ANALISIS_CAUSAL.md](config/ANALISIS_CAUSAL.md).
-
-### 5m — configuración validada causalmente
-
-Motor de referencia: `data/engine/python/v_nivel.py` (modo `aire`).
-Reprodujo **exactamente las 83 operaciones** del replay de NinjaTrader
-del 27-ago al 8-sep de 2026.
-
-| configuración | ops | PF | neto 2,61a (3c) | DD (3c) | mitades |
-|---|---|---|---|---|---|
-| **A · pasar la cuenta** (frescura ≤3) | 1.054 | **1.92** | $59.150 | **$1.870** | 1.87 / 1.98 |
-| B · máximo neto (sin frescura) | 2.897 | 1.47 | $91.882 | $3.771 | 1.48 / 1.45 |
-
-Parámetros completos y tablas por número de contratos en
-[config/CONFIGURACIONES.md](config/CONFIGURACIONES.md).
-
-**En uso: configuración A con 4 contratos** — DD $2.493, 96,6% de
-probabilidad de +$3.000 antes de −$2.000, mediana 5 semanas. Últimos 12
-meses: PF 2.27, $43.295, cero meses negativos.
-
-El hallazgo decisivo fue la **frescura de zona**: si el precio vuelve al
-Order Block dentro de las 3 primeras velas de 5m la reacción es fiable
-(PF 1.92); a partir de la vela 8 cae a 1.5. El `zone_max_age = 60` heredado
-permitía operar zonas de hasta cinco horas.
+> ## ⛔ La estrategia de 5m NO ES OPERABLE
+>
+> Verificada contra NinjaTrader: predicción +$1.625, resultado real **−$832**.
+> Se encontraron **siete look-aheads** en el motor de Python. Corregidos todos,
+> el sistema da **PF 1.03**. Una búsqueda de 160 configuraciones contra el motor
+> causal no supera **PF 1.13**.
+>
+> Veredicto completo: [config/VEREDICTO_5M.md](config/VEREDICTO_5M.md)
+> Historia de los errores: [config/ANALISIS_CAUSAL.md](config/ANALISIS_CAUSAL.md)
+>
+> **Cualquier cifra anterior de este repositorio ($386.343, $290.250, $84.831)
+> es inválida.** Las configuraciones de `config/CONFIGURACIONES.md` se midieron
+> con motores que tenían el séptimo look-ahead y tampoco deben usarse.
 
 ### 15m — SIN AUDITAR
 

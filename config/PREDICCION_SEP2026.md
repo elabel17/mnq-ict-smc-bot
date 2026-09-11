@@ -39,4 +39,11 @@ operación se separan los dos.
 
 ## Resultado real
 
-_(pendiente — rellenar tras el replay)_
+**16 operaciones, −$832.** La predicción decía 15 operaciones y +$1.625.
+
+Las entradas coincidieron al céntimo. Las salidas no. Causa: el séptimo
+look-ahead — el motor entraba una vela antes de que la orden pudiera estar
+puesta. Ver [VEREDICTO_5M.md](VEREDICTO_5M.md).
+
+La predicción registrada por escrito hizo su trabajo: sin ella, el resultado
+se habría podido explicar como mala suerte.
