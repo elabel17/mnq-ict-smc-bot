@@ -47,6 +47,7 @@ eqTol       = input.float(3.0, "Tolerancia para 'iguales' (pts)", group=grpLiq)
 
 grpFuerza = "Fuerza de reaccion (score compuesto)"
 mostrarFuerza = input.bool(true, "Mostrar % de fuerza dentro de la caja", group=grpFuerza)
+mostrarDesglose = input.bool(false, "Desglosar componentes (V/R/L/B) en vez de solo el %", group=grpFuerza)
 fuerzaMinima  = input.int(0, "Ocultar zonas con fuerza menor a (%)", minval=0, maxval=100, group=grpFuerza)
 usarSesgo1H   = input.bool(true, "Incluir sesgo de 1H en el score", group=grpFuerza)
 biasSmaLen    = input.int(10, "SMA del sesgo de 1H (velas de 1H)", group=grpFuerza)
@@ -88,6 +89,19 @@ biasScoreDe(dir, bias) =>
 
 combinarFuerza(volS, rngS, liqS, biasS, fvgS) =>
     math.round(volS * 0.30 + rngS * 0.20 + liqS * 0.20 + biasS * 0.15 + fvgS * 0.15)
+
+// texto de la caja: el % solo, o el desglose de los 4-5 componentes (para
+// diagnosticar exactamente cual factor esta empujando el score, en vez de
+// adivinar desde una captura de pantalla)
+textoFuerzaDe(fuerza, volS, rngS, liqS, biasS, fvgS) =>
+    if not mostrarFuerza or na(fuerza)
+        ""
+    else if not mostrarDesglose
+        str.tostring(fuerza) + "%"
+    else
+        str.tostring(fuerza) + "% (V:" + str.tostring(math.round(volS)) + " R:" + str.tostring(math.round(rngS))
+             + " L:" + str.tostring(math.round(liqS)) + " B:" + str.tostring(math.round(biasS))
+             + " F:" + str.tostring(math.round(fvgS)) + ")"
 
 // ---------------- deteccion por DESPLAZAMIENTO ----------------
 isDisp = not na(avgRng) and rng >= dispMult * avgRng
@@ -346,7 +360,7 @@ esDuplicado = obDispDir != 0 and solapaZonaViva(obDispDir, obDispTop, obDispBot)
 esDebil = fuerzaMinima > 0 and not na(obDispFuerza) and obDispFuerza < fuerzaMinima
 if obDispDir != 0 and not esDuplicado and not esDebil
     totalDetectadas += 1
-    textoFuerza = mostrarFuerza and not na(obDispFuerza) ? str.tostring(obDispFuerza) + "%" : ""
+    textoFuerza = textoFuerzaDe(obDispFuerza, obVolS, obRngS, obLiqS, obBiasS, 0.0)
     b = box.new(bar_index, obDispTop, bar_index, obDispBot,
          border_color = obDispDir == 1 ? color.new(color.lime, 30) : color.new(color.red, 30),
          bgcolor = obDispDir == 1 ? color.new(color.lime, 85) : color.new(color.red, 85),
@@ -380,7 +394,7 @@ if mostrarFVG and (fvgAlcista or fvgBajista) and array.size(cajas) > 0
             box.set_border_width(array.get(cajas, i), 2)
             if mostrarFuerza
                 nuevaFuerza = combinarFuerza(array.get(zVolS, i), array.get(zRngS, i), array.get(zLiqS, i), array.get(zBiasS, i), 100.0)
-                box.set_text(array.get(cajas, i), str.tostring(nuevaFuerza) + "%")
+                box.set_text(array.get(cajas, i), textoFuerzaDe(nuevaFuerza, array.get(zVolS, i), array.get(zRngS, i), array.get(zLiqS, i), array.get(zBiasS, i), 100.0))
 
 if mostrarFVG and fvgAlcista
     line.new(bar_index[2], high[2], bar_index, high[2], color = color.new(color.aqua, 40), style = line.style_dotted, width = 2)
