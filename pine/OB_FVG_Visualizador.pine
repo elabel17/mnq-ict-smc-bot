@@ -374,6 +374,8 @@ var array<line>  liqLineasLo = array.new<line>()
 var array<float> liqNivelLo  = array.new<float>()
 var array<int>   liqNaceLo   = array.new<int>()
 var array<int>   liqTocLo    = array.new<int>()
+var array<line>  liqGhost           = array.new<line>() // lineas ya barridas, en cuenta regresiva antes de borrarse
+var array<int>   liqGhostResuelveEn = array.new<int>()
 
 if mostrarLiq and not na(liqPH)
     origen = bar_index - liqLado
@@ -431,6 +433,14 @@ if mostrarLiq and array.size(liqNivelHi) > 0
                     array.shift(sweepBar)
                     array.shift(sweepPrice)
                     array.shift(sweepDir)
+                // se deja de rastrear activamente, pero se conserva un rato
+                // como "fantasma" (mismo criterio que las cajas de OB) para
+                // que se vea confirmado el barrido antes de desaparecer
+                array.push(liqGhost, array.get(liqLineasHi, i))
+                array.push(liqGhostResuelveEn, bar_index)
+            else
+                // vencida sin barrer: no confirmo nada, se borra sin dejar rastro
+                line.delete(array.get(liqLineasHi, i))
             array.remove(liqLineasHi, i)
             array.remove(liqNivelHi, i)
             array.remove(liqNaceHi, i)
@@ -454,10 +464,25 @@ if mostrarLiq and array.size(liqNivelLo) > 0
                     array.shift(sweepBar)
                     array.shift(sweepPrice)
                     array.shift(sweepDir)
+                array.push(liqGhost, array.get(liqLineasLo, i))
+                array.push(liqGhostResuelveEn, bar_index)
+            else
+                line.delete(array.get(liqLineasLo, i))
             array.remove(liqLineasLo, i)
             array.remove(liqNivelLo, i)
             array.remove(liqNaceLo, i)
             array.remove(liqTocLo, i)
+
+// limpieza de las lineas de liquidez "fantasma" (barridas), mismo criterio
+// de vida que las cajas de OB (vidaFantasma) para no dejarlas dibujadas para
+// siempre -- antes NUNCA se borraban (bug: se sacaban del array que las
+// rastreaba pero la linea seguia en el grafico indefinidamente)
+if array.size(liqGhost) > 0
+    for i = array.size(liqGhost) - 1 to 0
+        if bar_index - array.get(liqGhostResuelveEn, i) > vidaFantasma
+            line.delete(array.get(liqGhost, i))
+            array.remove(liqGhost, i)
+            array.remove(liqGhostResuelveEn, i)
 
 // ---------------- sombreado de sesion ----------------
 enSesion = not na(time(timeframe.period, sesIni, "America/New_York"))
