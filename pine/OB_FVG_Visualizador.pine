@@ -23,7 +23,7 @@ liqTol     = input.float(4.0, "Tolerancia de liquidez (pts)", group=grpOB)
 liqAccum   = input.int(6, "Racha que invalida (liquidez sucia)", group=grpOB)
 edadMax    = input.int(12, "Frescura operable (velas, igual al backtest)", group=grpOB)
 verTodo    = input.bool(true, "Mostrar TODO lo detectado, no solo lo operable (auditoria)", group=grpOB)
-vidaVisual = input.int(60, "Tope de vida visual si nunca se resuelve (velas)", group=grpOB)
+vidaFantasma = input.int(15, "Velas visible tras mitigarse (0 = borrar al instante)", group=grpOB)
 
 grpBOS = "Order Block (ruptura de estructura interna)"
 usarBOS    = input.bool(true, "Tambien detectar por BOS (estructura interna)", group=grpBOS)
@@ -161,6 +161,7 @@ var array<float> zBot    = array.new<float>()
 var array<int>   zNace   = array.new<int>()
 var array<bool>  zFVG    = array.new<bool>()
 var array<bool>  zFresco = array.new<bool>()   // true mientras esta dentro de edadMax (operable de verdad)
+var array<int>   zResuelveEn = array.new<int>() // bar_index en que se congelo (mitigada/vencida), -1 mientras sigue viva
 
 // crear zona nueva si hubo OB esta vela
 var int totalDetectadas = 0
@@ -177,6 +178,7 @@ if obDispDir != 0
     array.push(zNace, bar_index)
     array.push(zFVG, false)
     array.push(zFresco, true)
+    array.push(zResuelveEn, -1)
 
 // marcar confluencia con FVG (hacia atras, sobre zonas ya existentes -- igual
 // que en Python: el FVG de la vela actual se conoce ahora, se aplica a zonas
@@ -213,21 +215,28 @@ if array.size(cajas) > 0
             if edad > edadMax or invalidada
                 // se resuelve ahora: congelar el ancho, pasar a estilo "historico"
                 array.set(zFresco, i, false)
+                array.set(zResuelveEn, i, bar_index)
                 box.set_border_style(array.get(cajas, i), line.style_dotted)
                 box.set_bgcolor(array.get(cajas, i), color.new(dz == 1 ? color.lime : color.red, 95))
             else
                 // sigue viva: la caja crece una vela mas
                 box.set_right(array.get(cajas, i), bar_index)
-        limiteVida = verTodo ? vidaVisual : edadMax
-        if not array.get(zFresco, i) and edad > limiteVida
-            box.delete(array.get(cajas, i))
-            array.remove(cajas, i)
-            array.remove(zDir, i)
-            array.remove(zTop, i)
-            array.remove(zBot, i)
-            array.remove(zNace, i)
-            array.remove(zFVG, i)
-            array.remove(zFresco, i)
+        // la vida fantasma se cuenta desde que se RESOLVIO, no desde que nacio --
+        // si no, una zona mitigada al instante quedaba dibujada casi tanto tiempo
+        // como una que tardo en resolverse, amontonando decenas de zonas fantasma
+        if not array.get(zFresco, i)
+            edadResuelta = bar_index - array.get(zResuelveEn, i)
+            borrar = not verTodo or edadResuelta > vidaFantasma
+            if borrar
+                box.delete(array.get(cajas, i))
+                array.remove(cajas, i)
+                array.remove(zDir, i)
+                array.remove(zTop, i)
+                array.remove(zBot, i)
+                array.remove(zNace, i)
+                array.remove(zFVG, i)
+                array.remove(zFresco, i)
+                array.remove(zResuelveEn, i)
 
 // ============================================================================
 // LIQUIDEZ: pivotes confirmados (donde suelen descansar stops) + clusters de
