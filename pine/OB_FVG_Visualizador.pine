@@ -21,7 +21,8 @@ obScan     = input.int(10, "Velas atras para vela de origen", group=grpOB)
 liqWin     = input.int(12, "Ventana de liquidez", group=grpOB)
 liqTol     = input.float(4.0, "Tolerancia de liquidez (pts)", group=grpOB)
 liqAccum   = input.int(6, "Racha que invalida (liquidez sucia)", group=grpOB)
-edadMax    = input.int(12, "Frescura operable (velas, igual al backtest)", group=grpOB)
+edadMax    = input.int(12, "Frescura operable del BACKTEST (velas, referencia)", group=grpOB)
+aplicarFrescura = input.bool(false, "Aplicar ese limite al VISUAL (si no, solo invalida el precio)", group=grpOB)
 verTodo    = input.bool(true, "Mostrar TODO lo detectado, no solo lo operable (auditoria)", group=grpOB)
 vidaFantasma = input.int(15, "Velas visible tras mitigarse (0 = borrar al instante)", group=grpOB)
 
@@ -160,7 +161,7 @@ var array<float> zTop    = array.new<float>()
 var array<float> zBot    = array.new<float>()
 var array<int>   zNace   = array.new<int>()
 var array<bool>  zFVG    = array.new<bool>()
-var array<bool>  zFresco = array.new<bool>()   // true mientras esta dentro de edadMax (operable de verdad)
+var array<bool>  zFresco = array.new<bool>()   // true mientras el precio no la invalida (y, si aplicarFrescura esta activo, tambien dentro de edadMax)
 var array<int>   zResuelveEn = array.new<int>() // bar_index en que se congelo (mitigada/vencida), -1 mientras sigue viva
 
 // crear zona nueva si hubo OB esta vela
@@ -211,8 +212,9 @@ if array.size(cajas) > 0
         top = array.get(zTop, i)
         bot = array.get(zBot, i)
         invalidada = dz == 1 ? close < bot : close > top
+        vencidaPorEdad = aplicarFrescura and edad > edadMax
         if array.get(zFresco, i)
-            if edad > edadMax or invalidada
+            if vencidaPorEdad or invalidada
                 // se resuelve ahora: congelar el ancho, pasar a estilo "historico"
                 array.set(zFresco, i, false)
                 array.set(zResuelveEn, i, bar_index)
