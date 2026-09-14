@@ -828,3 +828,130 @@ Durante la creación del script de scalping, el mismo bug de la herramienta de e
 3. Confirmar comisión/slippage reales del bróker del usuario para recalcular la cifra neta exacta.
 4. Situación fiscal del usuario (país: República Dominicana, según conversación) — pendiente de que consulte con un contador/asesor fiscal local antes de mover ganancias grandes; no es algo que este análisis pueda resolver.
 5. Ordenar eventualmente los nombres de script duplicados/confundidos en la cuenta de TradingView del usuario (no urgente, todo funciona, es solo higiene).
+
+## ⛔ SESIÓN 2026-09-10 (noche) a 2026-09-14 — el fin de semana que invalidó todo lo anterior
+
+Trabajo hecho por otra sesión de Claude en la PC del usuario durante el fin de
+semana (27 commits), más los ajustes de esta sesión el 2026-09-14. Este es el
+estado real y vigente del proyecto — **todo lo reportado como "validado" en
+las secciones anteriores de este documento (15m v18 $121.696/PF 3.08, 5m
+scalp $386.343/PF 3.02) quedó demostrado como inválido.**
+
+### Lo que pasó: el replay real en NinjaTrader encontró un séptimo look-ahead
+
+El usuario llevó `ICT_5M_Scalp_Strategy.cs` a un replay real de NinjaTrader
+con **predicción registrada de antemano** (15 operaciones, +$1.625). El
+resultado real fue **16 operaciones, −$832**. Las entradas coincidieron al
+céntimo — el script estaba bien, el motor de Python mentía.
+
+Causa: el motor validaba una zona y **en la misma vela** comprobaba si el
+precio ya la había tocado — una orden límite no puede estar descansando en un
+nivel antes de que la zona exista. Corregido (entrada solo desde la vela
+siguiente), el sistema cae de PF 3.02 a **PF 1.03**. Una búsqueda de 160
+configuraciones adicionales contra el motor causal no superó **PF 1.13**.
+Veredicto completo: [`config/VEREDICTO_5M.md`](../config/VEREDICTO_5M.md).
+
+Con el mismo rasero se auditó el 15m (`v18`, $121.696/PF 3.08 reportado) y
+aparecieron **tres look-aheads propios** (el más caro: elegir el precio de
+entrada después de ver hasta dónde llegó la vela — el mismo error
+`math.max(low, zoneTop)` ya peleado semanas antes en el Pine). Corregidos los
+tres: **PF 0.99, winrate 50,2%** — una moneda al aire. Veredicto completo:
+[`config/VEREDICTO_15M.md`](../config/VEREDICTO_15M.md).
+
+**Conclusión conjunta: Order Blocks por desplazamiento operados con orden
+límite descansando en la zona NO tienen ventaja en MNQ, ni en 5m ni en 15m.**
+Los dos motores se escribieron por separado, con parámetros distintos, y
+contenían el mismo error central — no es casualidad, cada uno se optimizó
+contra su propio motor, y la optimización busca precisamente donde el motor
+miente.
+
+### Lo que sobrevivió: dos líneas nuevas, causales por construcción
+
+1. **Entrada por confirmación** — esperar la vela de reacción en la zona y
+   entrar a su cierre (no antes). PF 1.99, sesión 09-11 NY, pero solo ~35-44
+   operaciones/año (muestra chica, $6.290/año a 3 contratos). Detalle:
+   [`config/CONFIRMACION.md`](../config/CONFIRMACION.md).
+2. **Barrido de liquidez + reversión** (`sweep_reversion.py`) — mecanismo
+   nuevo, no es ruptura sino caza de stops sobre un pivote confirmado + cierre
+   de vuelta. **PF 2.09, ~79 ops/año, DD $2.628 (3c), 0 años negativos en 7**
+   — el mejor resultado de todo el proyecto (dos sesiones completas), con
+   mitades del histórico casi idénticas (1.93/2.33). **Nunca verificado en
+   NinjaTrader — máxima prioridad antes de considerar operarlo.** Detalle:
+   [`config/CONFLUENCIA_Y_LIQUIDEZ.md`](../config/CONFLUENCIA_Y_LIQUIDEZ.md).
+
+### Herramienta nueva: `pine/OB_FVG_Visualizador.pine`
+
+Indicador de auditoría (no estrategia) que replica exactamente la detección
+del motor de Python (OB por desplazamiento y por BOS, FVG, liquidez por
+pivotes con fusión de "iguales", sesión) para que el usuario audite
+visualmente en TradingView lo que el backtester está encontrando, en vez de
+confiar ciegamente en los números.
+
+Probado en vivo contra TradingView Desktop vía MCP — no solo compilado, con
+el gráfico real cargado y capturas verificadas. Se encontraron y corrigieron
+dos bugs reales durante esa auditoría en vivo (índice de array vacío en las
+primeras barras; cajas de OB apiladas por una duración visual fija que no
+reflejaba cuánto tiempo estuvo realmente vigente cada zona).
+
+**Dos fixes adicionales el 2026-09-14**, a partir de una captura de pantalla
+que el usuario compartió mostrando el problema en vivo:
+
+1. **Zonas fantasma amontonadas**: la vida visual de una zona ya mitigada se
+   contaba desde que *nacía*, no desde que se *resolvía* — una zona
+   invalidada casi al instante igual quedaba dibujada ~59 velas más, y con
+   detecciones frecuentes eso apilaba decenas de zonas fantasma superpuestas.
+   Corregido con un array paralelo `zResuelveEn` que marca el bar_index de
+   resolución; el input `vidaFantasma` (15 por defecto) ahora cuenta desde
+   ahí.
+2. **Límite de frescura de 12 velas desacoplado del visual**: el usuario
+   objetó (correctamente, y el propio gráfico lo demostró — de 1.701 OB
+   detectados solo quedaba 1 visible) que un OB puede reaccionar mucho
+   después de las 12 velas que usa el backtest como "frescura operable", y
+   que descartar zonas viejas sin tocar (sobre todo con confluencia FVG) es
+   conceptualmente distinto a descartar una zona ya invalidada por precio.
+   Ahora, por defecto (`aplicarFrescura = false`), una zona **solo pasa a
+   "histórica" cuando el precio cierra a través de ella** (rompe estructura),
+   nunca solo por edad. `edadMax` queda como referencia del parámetro que usa
+   el backtest, con un toggle para volver al comportamiento anterior si se
+   quiere comparar contra ese límite. Una mecha que toca la zona sin que el
+   cierre la rompa (el barrido clásico ICT) ya no la descarta — se mantiene
+   operable.
+
+Archivo entregado directamente en `Downloads/OB_FVG_Visualizador.pine` para
+copiar y pegar en el editor de Pine (la herramienta de escritura automática
+de Pine sigue sin apuntar de forma confiable al script correcto — ver
+incidente de herramienta más arriba, sigue sin resolverse de raíz).
+
+### Housekeeping
+
+- Se corrigió un error de compilación de NinjaScript (`ICT_5M_Scalp_Strategy.cs`
+  e `ICT_OB_Strategy_v18.cs`): faltaba `using NinjaTrader.Data;` para que el
+  enum `BarsPeriodType` fuera reconocido en `AddDataSeries(...)`.
+- Se corrigió la identidad de autor de un commit que había quedado con el
+  correo de trabajo del usuario en vez de su Gmail personal (metadata del
+  commit únicamente, sin impacto en el código); se configuró la identidad
+  correcta de git localmente para este repositorio.
+- README.md está al día (tocado en el mismo commit que cerró el fin de
+  semana, `b6aeb7f`) — es la fuente más rápida para ver el estado vigente del
+  proyecto en cualquier sesión nueva, antes de leer este documento completo.
+
+### Pendiente para retomar (reemplaza la lista anterior)
+
+1. **Verificar `sweep_reversion.py` (variante B, PF 2.09) en NinjaTrader con
+   predicción registrada** — mismo método que destapó el séptimo look-ahead
+   del 5m. Máxima prioridad antes de considerar operar cualquier cosa con
+   dinero real.
+2. Auditar con el mismo rigor las estrategias EMA/Fibonacci mencionadas en
+   `config/CONFLUENCIA_Y_LIQUIDEZ.md` (`EMANY11Replay`, `EMAMaxNetReplay`,
+   `FibBreakoutReplay`, `HybridReplayValidation`, `ICT_Market_Research`) — no
+   auditadas todavía.
+3. Resolver la inconsistencia encontrada en la simulación de escalado
+   dinámico de contratos (93,9% vs 98,9% en dos corridas del mismo caso)
+   antes de confiar en cualquier resultado de esa idea.
+4. Situación fiscal del usuario (RD) — sigue pendiente de asesor local.
+5. El NinjaScript del 5m (`ICT_5M_Scalp_Strategy.cs`) y del 15m
+   (`ICT_OB_Strategy_v18.cs`) quedan obsoletos frente a este veredicto — no
+   tiene sentido seguir probándolos en su forma actual. El NinjaScript
+   vigente para seguir iterando es `pine/automation/ICT_5M_Scalp_v2_Strategy.cs`
+   (con registro CSV por evento, el que se usó para el replay que destapó
+   el séptimo look-ahead).
