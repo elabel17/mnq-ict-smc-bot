@@ -45,9 +45,26 @@ liqLado     = input.int(8, "Velas a cada lado del pivote", group=grpLiq)
 liqEdadMax  = input.int(60, "Vencer nivel tras N velas sin barrer", group=grpLiq)
 eqTol       = input.float(3.0, "Tolerancia para 'iguales' (pts)", group=grpLiq)
 
+grpFuerza = "Fuerza de reaccion (volumen + desplazamiento)"
+mostrarFuerza = input.bool(true, "Mostrar % de fuerza dentro de la caja", group=grpFuerza)
+fuerzaMinima  = input.int(0, "Ocultar zonas con fuerza menor a (%)", minval=0, maxval=100, group=grpFuerza)
+
 // ---------------- rango promedio (igual a _avg_range) ----------------
 rng = high - low
 avgRng = ta.sma(rng, dispLen)[1]   // shift 1: el mismo avg[i-1] que usa Python
+avgVol = ta.sma(volume, dispLen)[1]
+
+// Score de fuerza (0-100%): promedia dos senales conocidas SIN mirar al
+// futuro en el momento en que la zona nace -- volumen de la vela disparadora
+// vs su propio promedio reciente (participacion institucional), y cuanto
+// se paso del umbral de desplazamiento (que tan violento fue el movimiento).
+// No es el algoritmo de ningun indicador de terceros, es una metrica propia
+// pensada para el mismo problema (auditar visualmente que tan "real" luce
+// cada OB), y queda documentada aqui para que se pueda auditar o ajustar.
+fuerzaDe(volRatio, rngRatio) =>
+    volScore = math.min(100.0, math.max(0.0, (volRatio - 1.0) / 2.0 * 100))       // 1x=0%, 3x+=100%
+    rngScore = math.min(100.0, math.max(0.0, (rngRatio - dispMult) / dispMult * 100)) // en el umbral=0%, al doble=100%
+    math.round((volScore + rngScore) / 2)
 
 // ---------------- deteccion por DESPLAZAMIENTO ----------------
 isDisp = not na(avgRng) and rng >= dispMult * avgRng
@@ -150,6 +167,13 @@ if usarBOS
             obDispBot := obBosBot
             ultPivLo := na
 
+// fuerza de la vela que dispara la zona (desplazamiento o BOS), calculada
+// con lo que se conoce al cierre de ESTA vela -- nunca mira adelante
+var float obDispFuerza = na
+obDispFuerza := na
+if obDispDir != 0 and not na(avgRng) and avgRng > 0 and not na(avgVol) and avgVol > 0
+    obDispFuerza := fuerzaDe(volume / avgVol, rng / avgRng)
+
 // ---------------- Fair Value Gap ----------------
 fvgAlcista = low > high[2] and (low - high[2]) >= minGap
 fvgBajista = high < low[2] and (low[2] - high) >= minGap
@@ -182,15 +206,20 @@ solapaZonaViva(dir, top, bot) =>
                     resultado := true
     resultado
 
-// crear zona nueva si hubo OB esta vela y no es duplicado de una ya viva
+// crear zona nueva si hubo OB esta vela, no es duplicado de una ya viva, y
+// (si se pidio) cumple la fuerza minima
 var int totalDetectadas = 0
 esDuplicado = obDispDir != 0 and solapaZonaViva(obDispDir, obDispTop, obDispBot)
-if obDispDir != 0 and not esDuplicado
+esDebil = fuerzaMinima > 0 and not na(obDispFuerza) and obDispFuerza < fuerzaMinima
+if obDispDir != 0 and not esDuplicado and not esDebil
     totalDetectadas += 1
+    textoFuerza = mostrarFuerza and not na(obDispFuerza) ? str.tostring(obDispFuerza) + "%" : ""
     b = box.new(bar_index, obDispTop, bar_index, obDispBot,
          border_color = obDispDir == 1 ? color.new(color.lime, 30) : color.new(color.red, 30),
          bgcolor = obDispDir == 1 ? color.new(color.lime, 85) : color.new(color.red, 85),
-         extend = extend.none)
+         extend = extend.none,
+         text = textoFuerza, text_size = size.tiny, text_color = chart.fg_color,
+         text_halign = text.align_center, text_valign = text.align_center)
     array.push(cajas, b)
     array.push(zDir, obDispDir)
     array.push(zTop, obDispTop)
