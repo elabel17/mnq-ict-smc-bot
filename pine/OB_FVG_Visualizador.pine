@@ -1,0 +1,329 @@
+//@version=6
+indicator("OB + FVG Visualizador (motor Python)", overlay=true, max_boxes_count=500, max_lines_count=200, max_labels_count=200)
+
+// ============================================================================
+// Replica EXACTA de la deteccion usada en el motor de Python
+// (data/engine/python/motor_confluencia.py). Lo que se ve aqui es, vela por
+// vela, lo mismo que el backtester esta usando -- para auditar visualmente
+// si la deteccion tiene sentido antes de seguir optimizando a ciegas.
+//
+// Nada de esto es look-ahead: cada zona se dibuja al cerrar la vela que la
+// genera, igual que en Python. La frescura (edad maxima) se muestra con la
+// opacidad de la caja: mas transparente = mas vieja.
+// ============================================================================
+
+// ---------------- inputs: deteccion de OB ----------------
+grpOB = "Order Block (desplazamiento)"
+dispLen    = input.int(20, "Velas para rango promedio", group=grpOB)
+dispMult   = input.float(1.5, "Umbral desplazamiento (x rango prom.)", step=0.1, group=grpOB)
+dispFrac   = input.float(0.6, "Fraccion de cierre direccional", step=0.05, group=grpOB)
+obScan     = input.int(10, "Velas atras para vela de origen", group=grpOB)
+liqWin     = input.int(12, "Ventana de liquidez", group=grpOB)
+liqTol     = input.float(4.0, "Tolerancia de liquidez (pts)", group=grpOB)
+liqAccum   = input.int(6, "Racha que invalida (liquidez sucia)", group=grpOB)
+edadMax    = input.int(12, "Frescura operable (velas, igual al backtest)", group=grpOB)
+verTodo    = input.bool(true, "Mostrar TODO lo detectado, no solo lo operable (auditoria)", group=grpOB)
+vidaVisual = input.int(60, "Tope de vida visual si nunca se resuelve (velas)", group=grpOB)
+
+grpBOS = "Order Block (ruptura de estructura interna)"
+usarBOS    = input.bool(true, "Tambien detectar por BOS (estructura interna)", group=grpBOS)
+pivLado    = input.int(2, "Velas a cada lado del pivote interno", group=grpBOS)
+
+grpFVG = "Fair Value Gap"
+mostrarFVG = input.bool(true, "Mostrar FVG", group=grpFVG)
+minGap     = input.float(0.0, "Hueco minimo (pts)", group=grpFVG)
+exigirFVG  = input.bool(true, "Marcar solo OB con FVG solapado (confluencia)", group=grpFVG)
+
+grpSes = "Sesion (hora NY)"
+sesIni     = input.session("0800-1300", "Ventana operable (NY)", group=grpSes)
+mostrarSesion = input.bool(true, "Sombrear la sesion", group=grpSes)
+
+grpLiq = "Liquidez (pivotes + iguales)"
+mostrarLiq  = input.bool(true, "Mostrar niveles de liquidez", group=grpLiq)
+liqLado     = input.int(8, "Velas a cada lado del pivote", group=grpLiq)
+liqEdadMax  = input.int(60, "Vencer nivel tras N velas sin barrer", group=grpLiq)
+eqTol       = input.float(3.0, "Tolerancia para 'iguales' (pts)", group=grpLiq)
+
+// ---------------- rango promedio (igual a _avg_range) ----------------
+rng = high - low
+avgRng = ta.sma(rng, dispLen)[1]   // shift 1: el mismo avg[i-1] que usa Python
+
+// ---------------- deteccion por DESPLAZAMIENTO ----------------
+isDisp = not na(avgRng) and rng >= dispMult * avgRng
+bullDisp = isDisp and close > open and (close - low) >= dispFrac * rng
+bearDisp = isDisp and close < open and (high - close) >= dispFrac * rng
+
+// vela de origen: ultima vela opuesta dentro de obScan velas atras
+findOrigenAlcista() =>
+    idx = -1
+    for k = 1 to obScan
+        if close[k] < open[k]
+            idx := k
+            break
+    idx
+findOrigenBajista() =>
+    idx = -1
+    for k = 1 to obScan
+        if close[k] > open[k]
+            idx := k
+            break
+    idx
+
+// filtro de liquidez: racha de velas que se acercaron al nivel del origen
+liqLimpiaAlcista(cand) =>
+    mx = 0
+    cu = 0
+    for j = 1 to liqWin
+        if low[j] <= cand + liqTol
+            cu += 1
+            mx := math.max(mx, cu)
+        else
+            cu := 0
+    mx < liqAccum
+liqLimpiaBajista(cand) =>
+    mx = 0
+    cu = 0
+    for j = 1 to liqWin
+        if high[j] >= cand - liqTol
+            cu += 1
+            mx := math.max(mx, cu)
+        else
+            cu := 0
+    mx < liqAccum
+
+var float obDispTop = na
+var float obDispBot = na
+var int   obDispDir = 0
+obDispDir := 0
+
+if bullDisp
+    idxO = findOrigenAlcista()
+    if idxO > 0
+        cand = low[idxO]
+        if liqLimpiaAlcista(cand)
+            obDispTop := high[idxO]
+            obDispBot := cand
+            obDispDir := 1
+
+if bearDisp
+    idxO = findOrigenBajista()
+    if idxO > 0
+        cand = high[idxO]
+        if liqLimpiaBajista(cand)
+            obDispTop := cand
+            obDispBot := low[idxO]
+            obDispDir := -1
+
+// ---------------- deteccion por BOS (estructura interna) ----------------
+var float ultPivHi = na
+var float ultPivLo = na
+var int   obBosDir = 0
+obBosDir := 0
+
+// pivote interno confirmado con pivLado velas a cada lado (retraso real:
+// ta.pivothigh/low ya solo confirman cuando ya paso esa cantidad de velas)
+ph = ta.pivothigh(high, pivLado, pivLado)
+pl = ta.pivotlow(low, pivLado, pivLado)
+if not na(ph)
+    ultPivHi := ph
+if not na(pl)
+    ultPivLo := pl
+
+if usarBOS
+    if not na(ultPivHi) and close > ultPivHi and close > open
+        idxO = findOrigenBajista()   // el bos alcista nace de la ultima vela bajista
+        if idxO > 0
+            obBosTop = high[idxO]
+            obBosBot = low[idxO]
+            obDispDir := 1
+            obDispTop := obBosTop
+            obDispBot := obBosBot
+            ultPivHi := na
+    else if not na(ultPivLo) and close < ultPivLo and close < open
+        idxO = findOrigenAlcista()
+        if idxO > 0
+            obBosTop = high[idxO]
+            obBosBot = low[idxO]
+            obDispDir := -1
+            obDispTop := obBosTop
+            obDispBot := obBosBot
+            ultPivLo := na
+
+// ---------------- Fair Value Gap ----------------
+fvgAlcista = low > high[2] and (low - high[2]) >= minGap
+fvgBajista = high < low[2] and (low[2] - high) >= minGap
+
+// ---------------- gestion de zonas vivas (arrays paralelos) ----------------
+var array<box>   cajas   = array.new<box>()
+var array<int>   zDir    = array.new<int>()
+var array<float> zTop    = array.new<float>()
+var array<float> zBot    = array.new<float>()
+var array<int>   zNace   = array.new<int>()
+var array<bool>  zFVG    = array.new<bool>()
+var array<bool>  zFresco = array.new<bool>()   // true mientras esta dentro de edadMax (operable de verdad)
+
+// crear zona nueva si hubo OB esta vela
+var int totalDetectadas = 0
+if obDispDir != 0
+    totalDetectadas += 1
+    b = box.new(bar_index, obDispTop, bar_index, obDispBot,
+         border_color = obDispDir == 1 ? color.new(color.lime, 30) : color.new(color.red, 30),
+         bgcolor = obDispDir == 1 ? color.new(color.lime, 85) : color.new(color.red, 85),
+         extend = extend.none)
+    array.push(cajas, b)
+    array.push(zDir, obDispDir)
+    array.push(zTop, obDispTop)
+    array.push(zBot, obDispBot)
+    array.push(zNace, bar_index)
+    array.push(zFVG, false)
+    array.push(zFresco, true)
+
+// marcar confluencia con FVG (hacia atras, sobre zonas ya existentes -- igual
+// que en Python: el FVG de la vela actual se conoce ahora, se aplica a zonas
+// vivas que se solapen, nunca hacia el futuro)
+if mostrarFVG and (fvgAlcista or fvgBajista) and array.size(cajas) > 0
+    fd = fvgAlcista ? 1 : -1
+    fTop = fvgAlcista ? low : low[2]
+    fBot = fvgAlcista ? high[2] : high
+    for i = 0 to array.size(cajas) - 1
+        if array.get(zDir, i) == fd and not (fBot > array.get(zTop, i) or fTop < array.get(zBot, i))
+            array.set(zFVG, i, true)
+            box.set_border_color(array.get(cajas, i), fd == 1 ? color.new(color.aqua, 10) : color.new(color.orange, 10))
+            box.set_border_width(array.get(cajas, i), 2)
+
+if mostrarFVG and fvgAlcista
+    line.new(bar_index[2], high[2], bar_index, high[2], color = color.new(color.aqua, 40), style = line.style_dotted, width = 2)
+if mostrarFVG and fvgBajista
+    line.new(bar_index[2], low[2], bar_index, low[2], color = color.new(color.orange, 40), style = line.style_dotted, width = 2)
+
+// La caja SOLO crece mientras la zona sigue viva de verdad (igual que en
+// Python: cleared -> touchable -> consumida). En cuanto se resuelve -- se
+// invalida (precio cierra del otro lado) o se agota la frescura operable --
+// se CONGELA su ancho ahi mismo. Asi el tamano de cada caja refleja cuanto
+// tiempo estuvo realmente vigente, en vez de una duracion fija identica para
+// todas, que era lo que generaba el amontonamiento.
+if array.size(cajas) > 0
+    for i = array.size(cajas) - 1 to 0
+        edad = bar_index - array.get(zNace, i)
+        dz = array.get(zDir, i)
+        top = array.get(zTop, i)
+        bot = array.get(zBot, i)
+        invalidada = dz == 1 ? close < bot : close > top
+        if array.get(zFresco, i)
+            if edad > edadMax or invalidada
+                // se resuelve ahora: congelar el ancho, pasar a estilo "historico"
+                array.set(zFresco, i, false)
+                box.set_border_style(array.get(cajas, i), line.style_dotted)
+                box.set_bgcolor(array.get(cajas, i), color.new(dz == 1 ? color.lime : color.red, 95))
+            else
+                // sigue viva: la caja crece una vela mas
+                box.set_right(array.get(cajas, i), bar_index)
+        limiteVida = verTodo ? vidaVisual : edadMax
+        if not array.get(zFresco, i) and edad > limiteVida
+            box.delete(array.get(cajas, i))
+            array.remove(cajas, i)
+            array.remove(zDir, i)
+            array.remove(zTop, i)
+            array.remove(zBot, i)
+            array.remove(zNace, i)
+            array.remove(zFVG, i)
+            array.remove(zFresco, i)
+
+// ============================================================================
+// LIQUIDEZ: pivotes confirmados (donde suelen descansar stops) + clusters de
+// maximos/minimos "iguales" (varios pivotes casi al mismo precio = mas
+// liquidez acumulada ahi, el iman clasico de ICT). Una vez que el precio
+// BARRE el nivel (mecha lo supera y cierra de vuelta), se marca como
+// consumido y desaparece -- asi el grafico solo muestra liquidez pendiente,
+// no ya cazada.
+// ============================================================================
+liqPH = ta.pivothigh(high, liqLado, liqLado)
+liqPL = ta.pivotlow(low, liqLado, liqLado)
+
+var array<line>  liqLineasHi = array.new<line>()
+var array<float> liqNivelHi  = array.new<float>()
+var array<int>   liqNaceHi   = array.new<int>()
+var array<int>   liqTocHi    = array.new<int>()   // cuantos pivotes cercanos = "iguales"
+var array<line>  liqLineasLo = array.new<line>()
+var array<float> liqNivelLo  = array.new<float>()
+var array<int>   liqNaceLo   = array.new<int>()
+var array<int>   liqTocLo    = array.new<int>()
+
+if mostrarLiq and not na(liqPH)
+    origen = bar_index - liqLado
+    // buscar si ya hay un nivel "igual" cerca -> engordar liquidez ahi
+    fusion = false
+    if array.size(liqNivelHi) > 0
+        for i = 0 to array.size(liqNivelHi) - 1
+            if math.abs(array.get(liqNivelHi, i) - liqPH) <= eqTol
+                array.set(liqTocHi, i, array.get(liqTocHi, i) + 1)
+                n = array.get(liqTocHi, i)
+                line.set_width(array.get(liqLineasHi, i), math.min(1 + n, 4))
+                line.set_x2(array.get(liqLineasHi, i), bar_index)
+                fusion := true
+    if not fusion
+        ln = line.new(origen, liqPH, bar_index, liqPH, color = color.new(color.fuchsia, 20), style = line.style_dashed, width = 1)
+        array.push(liqLineasHi, ln)
+        array.push(liqNivelHi, liqPH)
+        array.push(liqNaceHi, origen)
+        array.push(liqTocHi, 1)
+
+if mostrarLiq and not na(liqPL)
+    origen = bar_index - liqLado
+    fusion = false
+    if array.size(liqNivelLo) > 0
+        for i = 0 to array.size(liqNivelLo) - 1
+            if math.abs(array.get(liqNivelLo, i) - liqPL) <= eqTol
+                array.set(liqTocLo, i, array.get(liqTocLo, i) + 1)
+                n = array.get(liqTocLo, i)
+                line.set_width(array.get(liqLineasLo, i), math.min(1 + n, 4))
+                line.set_x2(array.get(liqLineasLo, i), bar_index)
+                fusion := true
+    if not fusion
+        ln = line.new(origen, liqPL, bar_index, liqPL, color = color.new(color.teal, 20), style = line.style_dashed, width = 1)
+        array.push(liqLineasLo, ln)
+        array.push(liqNivelLo, liqPL)
+        array.push(liqNaceLo, origen)
+        array.push(liqTocLo, 1)
+
+// barrido: la mecha supera el nivel y el CIERRE vuelve adentro -> se consume
+if mostrarLiq and array.size(liqNivelHi) > 0
+    for i = array.size(liqNivelHi) - 1 to 0
+        nivel = array.get(liqNivelHi, i)
+        barrido = high > nivel + eqTol and close < nivel
+        vencido = bar_index - array.get(liqNaceHi, i) > liqEdadMax
+        if barrido or vencido
+            line.set_x2(array.get(liqLineasHi, i), bar_index)
+            if barrido
+                line.set_color(array.get(liqLineasHi, i), color.new(color.fuchsia, 0))
+                label.new(bar_index, nivel, "barrido", style = label.style_label_down, size = size.tiny, color = color.new(color.fuchsia, 60), textcolor = color.white)
+            array.remove(liqLineasHi, i)
+            array.remove(liqNivelHi, i)
+            array.remove(liqNaceHi, i)
+            array.remove(liqTocHi, i)
+
+if mostrarLiq and array.size(liqNivelLo) > 0
+    for i = array.size(liqNivelLo) - 1 to 0
+        nivel = array.get(liqNivelLo, i)
+        barrido = low < nivel - eqTol and close > nivel
+        vencido = bar_index - array.get(liqNaceLo, i) > liqEdadMax
+        if barrido or vencido
+            line.set_x2(array.get(liqLineasLo, i), bar_index)
+            if barrido
+                line.set_color(array.get(liqLineasLo, i), color.new(color.teal, 0))
+                label.new(bar_index, nivel, "barrido", style = label.style_label_up, size = size.tiny, color = color.new(color.teal, 60), textcolor = color.white)
+            array.remove(liqLineasLo, i)
+            array.remove(liqNivelLo, i)
+            array.remove(liqNaceLo, i)
+            array.remove(liqTocLo, i)
+
+// ---------------- sombreado de sesion ----------------
+enSesion = not na(time(timeframe.period, sesIni, "America/New_York"))
+bgcolor(mostrarSesion and enSesion ? color.new(color.blue, 92) : na)
+
+// ---------------- tabla resumen ----------------
+var table info = table.new(position.top_right, 1, 3, bgcolor = color.new(color.black, 70), border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "OB+FVG Visualizador", text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 1, "OB detectados en total: " + str.tostring(totalDetectadas), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 2, "Visibles ahora: " + str.tostring(array.size(cajas)) + " (operables: contorno solido)", text_color = color.white, text_size = size.small)

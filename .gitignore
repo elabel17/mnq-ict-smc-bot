@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 *.log
+
+# datos de tick locales (5GB+, no pertenecen al repo)
+ticks data/
+__pycache__/
+*.pyc

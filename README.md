@@ -21,11 +21,23 @@ proyecto: **ningún backtest usa información futura del precio**.
 > es inválida.** Las configuraciones de `config/CONFIGURACIONES.md` se midieron
 > con motores que tenían el séptimo look-ahead y tampoco deben usarse.
 
-### 15m — SIN AUDITAR
+### 15m — auditado, dos líneas rentables (aún no verificadas en NinjaTrader)
 
-`pine/ICT_15M_OB_Entry_v18.pine` reportaba Net $121.696 / PF 3.08. **Ese
-número no ha pasado por la auditoría de causalidad** que se aplicó al de 5m
-y no debe usarse hasta revisarlo. Es trabajo pendiente.
+`pine/ICT_15M_OB_Entry_v18.pine` reportaba Net $121.696 / PF 3.08 — **ese
+número era inválido**, con tres look-aheads propios ([veredicto
+completo](config/VEREDICTO_15M.md)). Corregidos, la detección de OB por
+desplazamiento con orden límite descansando en la zona no tiene ventaja
+(PF 0.99). Dos líneas causales sí la tienen, exploradas después:
+
+| línea | PF | ops/año | ver |
+|---|---|---|---|
+| Confirmación por vela de reacción, 09-11 NY | 2.70 | ~35 | [CONFIRMACION.md](config/CONFIRMACION.md) |
+| Union (desplazamiento+BOS) + FVG, 08-13 NY | 1.50 | ~140 | [CONFLUENCIA_Y_LIQUIDEZ.md](config/CONFLUENCIA_Y_LIQUIDEZ.md) |
+| **Barrido de liquidez + reversión, 09-13 NY** | **2.09** | ~79 | [CONFLUENCIA_Y_LIQUIDEZ.md](config/CONFLUENCIA_Y_LIQUIDEZ.md) |
+
+La última es el mejor resultado combinado (PF, drawdown, 0 años negativos en
+7) de todo el proyecto. **Ninguna de las tres se ha verificado en
+NinjaTrader todavía** — es el paso obligatorio antes de operar cualquiera.
 
 ### Herramientas
 
@@ -33,6 +45,10 @@ y no debe usarse hasta revisarlo. Es trabajo pendiente.
   reales de NT8. Ningún archivo se copia a NinjaTrader sin pasar por aquí.
 - `pine/automation/ICT_5M_Scalp_v2_Strategy.cs` — estrategia de NT8 con
   registro CSV por evento en `Documents/NinjaTrader 8/export/`.
+- `pine/OB_FVG_Visualizador.pine` — indicador de auditoría visual: replica
+  exactamente la detección del motor de Python (OB, FVG, pivotes, zonas de
+  liquidez con "iguales") para revisar en TradingView, sin confiar
+  ciegamente en los números del backtest.
 
 ## Contenido
 
