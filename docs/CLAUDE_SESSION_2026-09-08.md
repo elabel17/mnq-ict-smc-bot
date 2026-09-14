@@ -955,3 +955,72 @@ incidente de herramienta más arriba, sigue sin resolverse de raíz).
    vigente para seguir iterando es `pine/automation/ICT_5M_Scalp_v2_Strategy.cs`
    (con registro CSV por evento, el que se usó para el replay que destapó
    el séptimo look-ahead).
+
+## 🔧 SESIÓN 2026-09-14 (continuación) — pulido del visualizador + score de fuerza
+
+Cuatro rondas de feedback directo del usuario sobre capturas reales del
+`OB_FVG_Visualizador.pine` corriendo en su TradingView, cada una con un fix
+inmediato:
+
+1. **Deduplicación de OBs**: en un tramo fuerte, varias velas seguidas
+   superaban el umbral de desplazamiento por separado y apilaban cajas
+   superpuestas de la misma pierna (visible en captura del usuario: decenas
+   de cajas rojas encimadas en un solo movimiento bajista). Fix: no se crea
+   una zona nueva si ya hay una viva de la misma dirección que se solapa en
+   precio.
+2. **Score de fuerza compuesto (5 factores)**: a pedido explícito del
+   usuario ("puedes usar varios factores... liquidez, FVG, dirección"), el
+   % que se muestra dentro de cada caja pasó de 2 factores (volumen +
+   desplazamiento) a 5: volumen 30%, desplazamiento 20%, **liquidez 20%**
+   (nace justo después de un barrido reciente a su favor — se agregó un
+   historial acotado de barridos, `sweepBar/Price/Dir`, para cruzarlo contra
+   cada OB nuevo), **sesgo de 1H 15%** (mismo método SMA que las estrategias
+   reales), **FVG 15%** (se suma después si el hueco aparece, y el texto de
+   la caja se recalcula solo). El usuario compartió el código de un
+   indicador de terceros ("Volume-Weighted Order Block Zones [BigBeluga]",
+   licencia CC BY-NC-SA) como referencia — **no se copió** (derechos de
+   autor), se diseñó una métrica propia con el mismo concepto, documentada
+   en el propio Pine.
+3. **Fuga de líneas de liquidez**: bug real encontrado por captura del
+   usuario ("rayas sin marco" que no desaparecían aunque el precio ya las
+   había pasado) — las líneas de liquidez barridas/vencidas se sacaban del
+   array que las rastreaba pero **nunca se llamaba `line.delete()`**,
+   quedaban dibujadas para siempre. Fix: vencidas sin barrer se borran al
+   instante, barridas se conservan un rato como "fantasma" (mismo criterio
+   `vidaFantasma` que las cajas de OB) y luego se borran.
+4. **Límite de frescura de 12 velas desacoplado del visual** (ronda
+   anterior, ya documentada arriba): una zona solo pasa a "histórica" cuando
+   el precio la invalida, nunca solo por edad.
+
+### Análisis pedido: ¿cuál proyección de entrada es mejor, y el score predice algo real?
+
+A pedido del usuario ("correr un análisis con la data... determinar cuál
+resultaba mejor, una estimación"), se corrió
+`data/engine/python/claude_analisis_proyecciones_y_score.py` contra el motor
+causal validado (`v_nivel.py`, 5m, 2 ticks slippage, $1.00/contrato/lado, 4
+contratos, gestión rescatada de `busqueda_causal.json`: entry_buffer 8pts,
+RR2 4.0, BE trigger 0.6R, SL buffer 4.0pts):
+
+**Proyecciones de entrada (`entry_mode`):**
+
+| modo | ops | net | PF | PF 1ª/2ª mitad |
+|---|---|---|---|---|
+| **aire** (única ejecutable) | 5.222 | **$157.404** | **1.30** | 1.33 / 1.27 |
+| mecha | 4.596 | $11.588 | 1.03 | 1.05 / 1.01 |
+| cuerpo | 3.471 | $19.931 | 1.07 | 1.14 / 1.02 |
+| medio | 2.405 | $15.201 | 1.11 | 1.05 / 1.15 |
+
+`aire` (orden límite fuera de la mecha) es la única ejecutable en la
+realidad Y por lejos la más rentable — no hay tradeoff que resolver.
+
+**Score de fuerza vs resultado real:** solo se pudieron reconstruir 2 de los
+5 factores del Pine con lo que `v_nivel.py` ya registra por trade (volumen,
+desplazamiento — liquidez/FVG/sesgo-1H no están trackeados en Python
+todavía). Filtrando por score mínimo, el PF sube de forma consistente en
+ambas mitades (1.30→1.38 al exigir ≥40-70%), pero el PnL promedio por decil
+**no es monótono** (el decil más débil tiene el segundo mejor PnL/trade) —
+relación positiva real pero ruidosa, no una señal limpia. Filtrar fuerte
+sacrifica >75% de las operaciones por solo ~6% de mejora en PF. Conclusión:
+útil como filtro suave, no como filtro duro; para probar el score completo
+de 5 factores habría que instrumentar `v_nivel.py` con liquidez/FVG/sesgo
+igual que se hizo en el Pine — pendiente si se quiere profundizar.
