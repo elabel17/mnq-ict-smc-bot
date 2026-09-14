@@ -1,0 +1,900 @@
+//@version=6
+indicator("OB + FVG Visualizador v10", overlay=true, max_boxes_count=500, max_lines_count=200, max_labels_count=200)
+
+// ============================================================================
+// Visualizador de la deteccion OB/FVG usada como base del motor Python.
+// Version de precision: sesgo 1H confirmado, ciclo de vida OB/FVG,
+// liquidez ponderada y candidatos alcista/bajista simultaneos.
+//
+// Nada de esto es look-ahead: cada zona se dibuja al cerrar la vela que la
+// genera, igual que en Python. La frescura (edad maxima) se muestra con la
+// opacidad de la caja: mas transparente = mas vieja.
+// ============================================================================
+
+// ---------------- inputs: deteccion de OB ----------------
+grpOB = "Order Block (desplazamiento)"
+dispLen    = input.int(20, "Velas para rango promedio", group=grpOB)
+dispMult   = input.float(1.5, "Umbral desplazamiento (x rango prom.)", step=0.1, group=grpOB)
+dispFrac   = input.float(0.6, "Fraccion de cierre direccional", step=0.05, group=grpOB)
+obScan     = input.int(10, "Velas atras para vela de origen", group=grpOB)
+liqWin     = input.int(12, "Ventana de liquidez", group=grpOB)
+liqTol     = input.float(4.0, "Tolerancia de liquidez (pts)", group=grpOB)
+liqAccum   = input.int(6, "Racha que invalida (liquidez sucia)", group=grpOB)
+edadMax    = input.int(12, "Frescura operable del BACKTEST (velas, referencia)", group=grpOB)
+aplicarFrescura = input.bool(false, "Aplicar ese limite al VISUAL (si no, solo invalida el precio)", group=grpOB)
+verTodo    = input.bool(true, "Mostrar TODO lo detectado, no solo lo operable (auditoria)", group=grpOB)
+vidaFantasma = input.int(15, "Velas visible tras mitigarse (0 = borrar al instante)", group=grpOB)
+dupSolapePct = input.float(70.0, "Solape minimo para considerar OB duplicado (%)", minval=10.0, maxval=100.0, step=5.0, group=grpOB)
+penalizarMitigacion = input.bool(true, "Reducir score despues de toques/penetracion", group=grpOB)
+
+grpBOS = "Order Block (ruptura de estructura interna)"
+usarBOS    = input.bool(true, "Tambien detectar por BOS (estructura interna)", group=grpBOS)
+pivLado    = input.int(2, "Velas a cada lado del pivote interno", group=grpBOS)
+
+grpFVG = "Fair Value Gap"
+mostrarFVG = input.bool(true, "Mostrar lineas de FVG", group=grpFVG)
+minGap     = input.float(0.0, "Hueco minimo (pts)", group=grpFVG)
+fvgVinculoVelas = input.int(3, "Vincular FVG de la misma pierna hasta N velas", minval=0, maxval=6, group=grpFVG)
+fvgDistZona = input.float(1.0, "Distancia maxima FVG-OB (x alto del OB)", minval=0.0, maxval=5.0, step=0.25, group=grpFVG)
+
+grpTend = "Linea de tendencia estructural"
+mostrarTendencia = input.bool(true, "Mostrar linea de tendencia", group=grpTend)
+tendLado = input.int(5, "Velas a cada lado del pivote", minval=2, maxval=20, group=grpTend)
+tendExtender = input.bool(true, "Extender linea hacia la derecha", group=grpTend)
+tendColorAlcista = input.color(color.new(color.aqua, 55), "Color alcista", group=grpTend)
+tendColorBajista = input.color(color.new(color.orange, 55), "Color bajista", group=grpTend)
+
+grpSes = "Sesion (hora NY)"
+sesIni     = input.session("0800-1300", "Ventana operable (NY)", group=grpSes)
+mostrarSesion = input.bool(true, "Sombrear la sesion", group=grpSes)
+
+grpLiq = "Liquidez (pivotes + iguales)"
+mostrarLiq  = input.bool(true, "Mostrar niveles de liquidez", group=grpLiq)
+liqLado     = input.int(8, "Velas a cada lado del pivote", group=grpLiq)
+liqEdadMax  = input.int(60, "Vencer nivel tras N velas sin barrer", group=grpLiq)
+eqTol       = input.float(3.0, "Tolerancia para 'iguales' (pts)", group=grpLiq)
+liqAtrLen   = input.int(14, "ATR para normalizar liquidez", minval=5, maxval=100, group=grpLiq)
+liqAtrTol   = input.float(0.08, "Tolerancia adicional (x ATR)", minval=0.0, maxval=1.0, step=0.01, group=grpLiq)
+liqDistAtr  = input.float(0.50, "Distancia minima evaluada (x ATR)", minval=0.0, maxval=5.0, step=0.05, group=grpLiq)
+
+grpFuerza = "Fuerza de reaccion (score compuesto)"
+mostrarFuerza = input.bool(true, "Mostrar % de fuerza dentro de la caja", group=grpFuerza)
+mostrarDesglose = input.bool(false, "Desglosar componentes (V/R/L/B) en vez de solo el %", group=grpFuerza)
+fuerzaMinima  = input.int(0, "Ocultar zonas con fuerza menor a (%)", minval=0, maxval=100, group=grpFuerza)
+usarSesgo1H   = input.bool(true, "Incluir sesgo de 1H en el score", group=grpFuerza)
+biasSmaLen    = input.int(10, "SMA del sesgo de 1H (velas de 1H)", group=grpFuerza)
+liqCercaPts   = input.float(3.0, "Multiplicador de cercania de liquidez (x tolerancia 'iguales' para barridos ya ocurridos, x alto de zona para riesgo/objetivo pendiente)", group=grpFuerza)
+liqVentanaBar = input.int(30, "Considerar barridos de los ultimos N eventos", group=grpFuerza)
+marcarCercano = input.bool(true, "Resaltar candidatos alcista y bajista cercanos", group=grpFuerza)
+
+// ---------------- rango promedio (igual a _avg_range) ----------------
+rng = high - low
+avgRng = ta.sma(rng, dispLen)[1]   // shift 1: el mismo avg[i-1] que usa Python
+avgVol = ta.sma(volume, dispLen)[1]
+atrLiq = ta.atr(liqAtrLen)
+tolIguales = math.max(eqTol, atrLiq * liqAtrTol)
+
+// Sesgo de 1H confirmado. El desplazamiento [1] dentro del contexto de 1H,
+// combinado con lookahead_on, entrega la ultima vela horaria CERRADA de
+// forma consistente en historico y tiempo real.
+h1Bias = usarSesgo1H ? request.security(syminfo.tickerid, "60", math.sign(close[1] - ta.sma(close, biasSmaLen)[1]), lookahead=barmerge.lookahead_on) : 0.0
+
+// ============================================================================
+// SCORE DE FUERZA (0-100%): combina 5 factores que el indicador YA calcula
+// por separado, ponderados. Cada uno se conoce sin mirar al futuro en el
+// momento en que la zona nace (el de FVG puede subir mas tarde, cuando el
+// hueco aparece -- ver bloque de confluencia FVG mas abajo, que actualiza el
+// texto). No es el algoritmo de ningun indicador de terceros, es una metrica
+// propia para el mismo problema (auditar visualmente que tan "real" luce
+// cada OB), documentada aqui para poder auditarla o ajustar los pesos.
+//
+//   30% volumen de la vela disparadora vs su promedio (participacion real)
+//   20% cuanto se paso del umbral de desplazamiento (violencia del movimiento)
+//   20% liquidez: 100% si nace tras un barrido confirmado a su favor O si
+//       hay liquidez sin cazar del lado que FAVORECE el trade (iman/objetivo);
+//       0% si hay liquidez sin cazar del lado que INVALIDA la zona (riesgo
+//       de que el precio la atraviese para ir a buscarla, tiene prioridad
+//       sobre el objetivo a favor); 50% si no hay ninguna senal clara.
+//       El OB vivo mas cercano se vuelve a evaluar en cada vela.
+//   15% alineacion con el sesgo de 1H (a favor / neutro / en contra)
+//   15% FVG asociado: abierto=100%, mitigado >=50%=50%, rellenado=0%
+// ============================================================================
+volScoreDe(volRatio) => math.min(100.0, math.max(0.0, (volRatio - 1.0) / 2.0 * 100))          // 1x=0%, 3x+=100%
+rngScoreDe(rngRatio) => math.min(100.0, math.max(0.0, (rngRatio - dispMult) / dispMult * 100)) // en el umbral=0%, al doble=100%
+biasScoreDe(dir, bias) =>
+    not usarSesgo1H or bias == 0 ? 50.0 : (dir == 1 and bias > 0) or (dir == -1 and bias < 0) ? 100.0 : 0.0
+
+combinarFuerza(volS, rngS, liqS, biasS, fvgS) =>
+    math.round(volS * 0.30 + rngS * 0.20 + liqS * 0.20 + biasS * 0.15 + fvgS * 0.15)
+
+// texto de la caja: el % solo, o el desglose de los 4-5 componentes (para
+// diagnosticar exactamente cual factor esta empujando el score, en vez de
+// adivinar desde una captura de pantalla)
+textoFuerzaDe(fuerza, volS, rngS, liqS, biasS, fvgS) =>
+    if not mostrarFuerza or na(fuerza)
+        ""
+    else if not mostrarDesglose
+        str.tostring(fuerza) + "%"
+    else
+        str.tostring(fuerza) + "% (V:" + str.tostring(math.round(volS)) + " R:" + str.tostring(math.round(rngS))
+             + " L:" + str.tostring(math.round(liqS)) + " B:" + str.tostring(math.round(biasS))
+             + " F:" + str.tostring(math.round(fvgS)) + ")"
+
+// ---------------- deteccion por DESPLAZAMIENTO ----------------
+isDisp = not na(avgRng) and rng >= dispMult * avgRng
+bullDisp = isDisp and close > open and (close - low) >= dispFrac * rng
+bearDisp = isDisp and close < open and (high - close) >= dispFrac * rng
+
+// vela de origen: ultima vela opuesta dentro de obScan velas atras
+findOrigenAlcista() =>
+    idx = -1
+    for k = 1 to obScan
+        if close[k] < open[k]
+            idx := k
+            break
+    idx
+findOrigenBajista() =>
+    idx = -1
+    for k = 1 to obScan
+        if close[k] > open[k]
+            idx := k
+            break
+    idx
+
+// filtro de liquidez: racha de velas que se acercaron al nivel del origen
+liqLimpiaAlcista(cand) =>
+    mx = 0
+    cu = 0
+    for j = 1 to liqWin
+        if low[j] <= cand + liqTol
+            cu += 1
+            mx := math.max(mx, cu)
+        else
+            cu := 0
+    mx < liqAccum
+liqLimpiaBajista(cand) =>
+    mx = 0
+    cu = 0
+    for j = 1 to liqWin
+        if high[j] >= cand - liqTol
+            cu += 1
+            mx := math.max(mx, cu)
+        else
+            cu := 0
+    mx < liqAccum
+
+// historial acotado de barridos de liquidez (poblado mas abajo, en el bloque
+// LIQUIDEZ) para poder puntuar si un OB nace justo despues de un barrido a
+// su favor -- dir guardada es la direccion de OB que ese barrido soporta:
+// 1 (barrido de MINIMOS, favorece OB alcista), -1 (barrido de MAXIMOS,
+// favorece OB bajista)
+var array<int>   sweepBar   = array.new<int>()
+var array<float> sweepPrice = array.new<float>()
+var array<int>   sweepDir   = array.new<int>()
+
+// niveles de liquidez TODAVIA sin barrer (poblados mas abajo, en el bloque
+// LIQUIDEZ) -- se declaran aqui arriba para poder consultarlos al puntuar
+// un OB nuevo por si hay liquidez "detras" de la zona sin cazar todavia
+var array<float> liqNivelHi = array.new<float>()
+var array<float> liqNivelLo = array.new<float>()
+
+liqScoreDe(dir, precio) =>
+    resultado = 0.0
+    if array.size(sweepBar) > 0
+        tol = tolIguales * liqCercaPts
+        desde = math.max(0, array.size(sweepBar) - liqVentanaBar)
+        for i = desde to array.size(sweepBar) - 1
+            if array.get(sweepDir, i) == dir and math.abs(array.get(sweepPrice, i) - precio) <= tol
+                resultado := 100.0
+    resultado
+
+// liquidez SIN BARRER que queda justo detras del borde lejano de la zona
+// (el lado opuesto a donde se espera que reaccione el precio): si esta ahi,
+// el precio puede atravesar la zona para ir a cazarla antes de revertir de
+// verdad -- por eso resta puntos en vez de sumar, a diferencia de un
+// barrido ya CONFIRMADO (liqScoreDe), que es lo contrario: senal de que la
+// zona nace LIMPIA, sin liquidez pendiente tirando de ella hacia el otro lado
+liqEnPeligro(dir, top, bot) =>
+    resultado = false
+    // distancia relativa al TAMANO de la propia zona, no un numero fijo de
+    // puntos -- un numero fijo no tiene sentido igual para una zona de 10pts
+    // que para una de 100pts. Antes esto y liqEnFavor usaban distancias fijas
+    // descalibradas (peligro muy corta, favor muy larga) y terminaban
+    // agarrando estructura no relacionada o ignorando la relevante.
+    alto = top - bot
+    distMax = alto * liqCercaPts
+    if dir == 1 and array.size(liqNivelLo) > 0
+        for i = 0 to array.size(liqNivelLo) - 1
+            nivel = array.get(liqNivelLo, i)
+            // liquidez pendiente por DEBAJO del piso de la zona alcista
+            if nivel <= bot and nivel >= bot - distMax
+                resultado := true
+    if dir == -1 and array.size(liqNivelHi) > 0
+        for i = 0 to array.size(liqNivelHi) - 1
+            nivel = array.get(liqNivelHi, i)
+            // liquidez pendiente por ENCIMA del techo de la zona bajista
+            if nivel >= top and nivel <= top + distMax
+                resultado := true
+    resultado
+
+// liquidez SIN BARRER en el sentido en que se espera que viaje el precio
+// (mas alla del borde por donde SALE la operacion, no por donde entra):
+// actua como iman, un objetivo que tira del precio a favor de la
+// direccion del trade -- lo opuesto de liqEnPeligro. Misma distancia
+// relativa que el peligro (antes era 2x mas ancha sin ninguna razon
+// solida, lo que la hacia agarrar estructura lejana no relacionada)
+liqEnFavor(dir, top, bot) =>
+    resultado = false
+    alto = top - bot
+    distMax = alto * liqCercaPts
+    if dir == 1 and array.size(liqNivelHi) > 0
+        for i = 0 to array.size(liqNivelHi) - 1
+            nivel = array.get(liqNivelHi, i)
+            // liquidez pendiente por ENCIMA: objetivo alcista a favor de un OB alcista
+            if nivel >= top and nivel <= top + distMax
+                resultado := true
+    if dir == -1 and array.size(liqNivelLo) > 0
+        for i = 0 to array.size(liqNivelLo) - 1
+            nivel = array.get(liqNivelLo, i)
+            // liquidez pendiente por DEBAJO: objetivo bajista a favor de un OB bajista
+            if nivel <= bot and nivel >= bot - distMax
+                resultado := true
+    resultado
+
+// componente final de liquidez del score: 0% si hay liquidez sin cazar del
+// lado que INVALIDA la zona (riesgo de que el precio la atraviese para ir
+// a buscarla); 50% si no existe una senal clara; 100% si nace tras un barrido
+// confirmado a su favor, O si hay liquidez sin cazar del lado que FAVORECE
+// la direccion del trade (actua como iman/objetivo, sube la confianza).
+// El riesgo tiene prioridad: una zona con liquidez de invalidacion cerca
+// nunca sube de score solo porque tambien tenga un objetivo a favor.
+liqComponenteDe(dir, top, bot) =>
+    precioSoporte = dir == 1 ? bot : top
+    tieneSoporte = liqScoreDe(dir, precioSoporte) > 0
+    tieneFavor = liqEnFavor(dir, top, bot)
+    tienePeligro = liqEnPeligro(dir, top, bot)
+    tienePeligro ? 0.0 : ((tieneSoporte or tieneFavor) ? 100.0 : 50.0)
+
+var float obDispTop = na
+var float obDispBot = na
+var int   obDispDir = 0
+obDispDir := 0
+
+if bullDisp
+    idxO = findOrigenAlcista()
+    if idxO > 0
+        cand = low[idxO]
+        if liqLimpiaAlcista(cand)
+            obDispTop := high[idxO]
+            obDispBot := cand
+            obDispDir := 1
+
+if bearDisp
+    idxO = findOrigenBajista()
+    if idxO > 0
+        cand = high[idxO]
+        if liqLimpiaBajista(cand)
+            obDispTop := cand
+            obDispBot := low[idxO]
+            obDispDir := -1
+
+// ---------------- deteccion por BOS (estructura interna) ----------------
+var float ultPivHi = na
+var float ultPivLo = na
+var int   obBosDir = 0
+obBosDir := 0
+
+// pivote interno confirmado con pivLado velas a cada lado (retraso real:
+// ta.pivothigh/low ya solo confirman cuando ya paso esa cantidad de velas)
+ph = ta.pivothigh(high, pivLado, pivLado)
+pl = ta.pivotlow(low, pivLado, pivLado)
+if not na(ph)
+    ultPivHi := ph
+if not na(pl)
+    ultPivLo := pl
+
+if usarBOS
+    if not na(ultPivHi) and close > ultPivHi and close > open
+        idxO = findOrigenAlcista()   // el BOS alcista nace de la ultima vela bajista
+        if idxO > 0
+            obBosTop = high[idxO]
+            obBosBot = low[idxO]
+            obDispDir := 1
+            obDispTop := obBosTop
+            obDispBot := obBosBot
+            ultPivHi := na
+    else if not na(ultPivLo) and close < ultPivLo and close < open
+        idxO = findOrigenBajista()   // el BOS bajista nace de la ultima vela alcista
+        if idxO > 0
+            obBosTop = high[idxO]
+            obBosBot = low[idxO]
+            obDispDir := -1
+            obDispTop := obBosTop
+            obDispBot := obBosBot
+            ultPivLo := na
+
+// fuerza de la vela que dispara la zona (desplazamiento o BOS): se calculan
+// los 4 componentes conocidos al cierre de ESTA vela (nunca mira adelante) y
+// se guardan por separado -- el 5to (FVG) se suma despues si aparece, ver el
+// bloque de confluencia FVG mas abajo, que recalcula el texto de la caja
+var float obDispFuerza = na
+var float obVolS  = na
+var float obRngS  = na
+var float obLiqS  = na
+var float obBiasS = na
+obDispFuerza := na
+obVolS := na
+obRngS := na
+obLiqS := na
+obBiasS := na
+if obDispDir != 0 and not na(avgRng) and avgRng > 0 and not na(avgVol) and avgVol > 0
+    obVolS := volScoreDe(volume / avgVol)
+    obRngS := rngScoreDe(rng / avgRng)
+    obLiqS := liqComponenteDe(obDispDir, obDispTop, obDispBot)
+    obBiasS := biasScoreDe(obDispDir, h1Bias)
+    obDispFuerza := combinarFuerza(obVolS, obRngS, obLiqS, obBiasS, 0.0)
+
+// ---------------- Fair Value Gap ----------------
+fvgAlcista = low > high[2] and (low - high[2]) >= minGap
+fvgBajista = high < low[2] and (low[2] - high) >= minGap
+
+// ---------------- gestion de zonas vivas (arrays paralelos) ----------------
+var array<box>   cajas   = array.new<box>()
+var array<int>   zDir    = array.new<int>()
+var array<float> zTop    = array.new<float>()
+var array<float> zBot    = array.new<float>()
+var array<int>   zNace   = array.new<int>()
+var array<bool>  zFVG    = array.new<bool>()
+var array<bool>  zFresco = array.new<bool>()   // true mientras el precio no la invalida (y, si aplicarFrescura esta activo, tambien dentro de edadMax)
+var array<int>   zResuelveEn = array.new<int>() // bar_index en que se congelo (mitigada/vencida), -1 mientras sigue viva
+var array<float> zVolS   = array.new<float>()   // componentes del score de fuerza, guardados para recalcular el texto cuando llegue el bono de FVG
+var array<float> zRngS   = array.new<float>()
+var array<float> zLiqS   = array.new<float>()
+var array<float> zBiasS  = array.new<float>()
+var array<int>   zFVGEstado = array.new<int>()   // 0=sin FVG, 1=abierto, 2=mitigado >=50%, 3=rellenado
+var array<float> zFVGTop = array.new<float>()
+var array<float> zFVGBot = array.new<float>()
+var array<int>   zToques = array.new<int>()
+var array<float> zPenMax = array.new<float>()    // penetracion maxima del OB, 0..1
+var array<bool>  zDentroPrev = array.new<bool>() // evita contar varias velas de una misma visita como toques distintos
+
+// Evita duplicados de la MISMA pierna, pero permite OB distintos que solo se
+// tocan o solapan parcialmente. La version anterior descartaba la candidata
+// ante CUALQUIER solape; eso podia borrar un OB/FVG nuevo situado encima de
+// una zona antigua. Ahora el solape debe cubrir al menos dupSolapePct del
+// alto de la zona mas pequena para considerarlas realmente equivalentes.
+solapaZonaViva(dir, top, bot) =>
+    resultado = false
+    altoNuevo = math.max(top - bot, syminfo.mintick)
+    if array.size(cajas) > 0
+        for i = 0 to array.size(cajas) - 1
+            if array.get(zDir, i) == dir and array.get(zFresco, i)
+                exTop = array.get(zTop, i)
+                exBot = array.get(zBot, i)
+                altoExistente = math.max(exTop - exBot, syminfo.mintick)
+                interseccion = math.max(0.0, math.min(top, exTop) - math.max(bot, exBot))
+                baseComparacion = math.min(altoNuevo, altoExistente)
+                solapePct = interseccion / baseComparacion * 100.0
+                if solapePct >= dupSolapePct
+                    resultado := true
+    resultado
+
+// Crear toda zona OB valida y no duplicada. No se exige FVG: esa confluencia
+// suma 15 puntos ponderados y cambia el contorno, pero nunca decide por si
+// sola si un OB existe. Las zonas se conservan internamente para que un FVG
+// que aparezca despues pueda elevar su score.
+var int totalDetectadas = 0
+esDuplicado = obDispDir != 0 and solapaZonaViva(obDispDir, obDispTop, obDispBot)
+if obDispDir != 0 and not esDuplicado
+    totalDetectadas += 1
+    textoFuerza = textoFuerzaDe(obDispFuerza, obVolS, obRngS, obLiqS, obBiasS, 0.0)
+    visibleInicial = fuerzaMinima <= 0 or (not na(obDispFuerza) and obDispFuerza >= fuerzaMinima)
+    b = box.new(bar_index, obDispTop, bar_index, obDispBot,
+         border_color = visibleInicial ? (obDispDir == 1 ? color.new(color.lime, 30) : color.new(color.red, 30)) : na,
+         bgcolor = visibleInicial ? (obDispDir == 1 ? color.new(color.lime, 85) : color.new(color.red, 85)) : na,
+         extend = extend.none,
+         text = visibleInicial ? textoFuerza : "", text_size = size.tiny, text_color = chart.fg_color,
+         text_halign = text.align_center, text_valign = text.align_center)
+    array.push(cajas, b)
+    array.push(zDir, obDispDir)
+    array.push(zTop, obDispTop)
+    array.push(zBot, obDispBot)
+    array.push(zNace, bar_index)
+    array.push(zFVG, false)
+    array.push(zFresco, true)
+    array.push(zResuelveEn, -1)
+    array.push(zVolS, obVolS)
+    array.push(zRngS, obRngS)
+    array.push(zLiqS, obLiqS)
+    array.push(zBiasS, obBiasS)
+    array.push(zFVGEstado, 0)
+    array.push(zFVGTop, na)
+    array.push(zFVGBot, na)
+    array.push(zToques, 0)
+    array.push(zPenMax, 0.0)
+    array.push(zDentroPrev, false)
+
+// Asociar el FVG con un OB vivo de la misma direccion. Se acepta solape real
+// o un FVG adyacente generado por la misma pierna dentro de fvgVinculoVelas.
+// Esto evita perder la confluencia clasica en la que el hueco queda justo
+// delante del OB, sin invadir geometricamente la vela de origen.
+if (fvgAlcista or fvgBajista) and array.size(cajas) > 0
+    fd = fvgAlcista ? 1 : -1
+    fTop = fvgAlcista ? low : low[2]
+    fBot = fvgAlcista ? high[2] : high
+    int mejorZonaFVG = -1
+    float mejorDistFVG = na
+    for i = 0 to array.size(cajas) - 1
+        if array.get(zFresco, i) and array.get(zDir, i) == fd and array.get(zFVGEstado, i) == 0
+            zonaTop = array.get(zTop, i)
+            zonaBot = array.get(zBot, i)
+            altoZona = math.max(zonaTop - zonaBot, syminfo.mintick)
+            solapaFVG = not (fBot > zonaTop or fTop < zonaBot)
+            distanciaFVG = fBot > zonaTop ? fBot - zonaTop : zonaBot > fTop ? zonaBot - fTop : 0.0
+            mismaPierna = bar_index - array.get(zNace, i) <= fvgVinculoVelas and distanciaFVG <= altoZona * fvgDistZona
+            if solapaFVG or mismaPierna
+                if mejorZonaFVG == -1
+                    mejorZonaFVG := i
+                    mejorDistFVG := distanciaFVG
+                else if distanciaFVG < mejorDistFVG or (distanciaFVG == mejorDistFVG and array.get(zNace, i) > array.get(zNace, mejorZonaFVG))
+                    mejorZonaFVG := i
+                    mejorDistFVG := distanciaFVG
+    if mejorZonaFVG != -1
+        array.set(zFVG, mejorZonaFVG, true)
+        array.set(zFVGEstado, mejorZonaFVG, 1)
+        array.set(zFVGTop, mejorZonaFVG, fTop)
+        array.set(zFVGBot, mejorZonaFVG, fBot)
+
+if mostrarFVG and fvgAlcista
+    line.new(bar_index[2], high[2], bar_index, high[2], color = color.new(color.aqua, 40), style = line.style_dotted, width = 2)
+if mostrarFVG and fvgBajista
+    line.new(bar_index[2], low[2], bar_index, low[2], color = color.new(color.orange, 40), style = line.style_dotted, width = 2)
+
+// La caja SOLO crece mientras la zona sigue viva de verdad (igual que en
+// Python: cleared -> touchable -> consumida). En cuanto se resuelve -- se
+// invalida (precio cierra del otro lado) o se agota la frescura operable --
+// se CONGELA su ancho ahi mismo. Asi el tamano de cada caja refleja cuanto
+// tiempo estuvo realmente vigente, en vez de una duracion fija identica para
+// todas, que era lo que generaba el amontonamiento.
+if array.size(cajas) > 0
+    for i = array.size(cajas) - 1 to 0
+        edad = bar_index - array.get(zNace, i)
+        dz = array.get(zDir, i)
+        top = array.get(zTop, i)
+        bot = array.get(zBot, i)
+        invalidada = dz == 1 ? close < bot : close > top
+        vencidaPorEdad = aplicarFrescura and edad > edadMax
+        if array.get(zFresco, i)
+            // Estado de mitigacion del OB. Una visita puede durar varias velas,
+            // pero solo se cuenta como un toque hasta que el precio salga y vuelva.
+            if edad > 0
+                tocaZona = high >= bot and low <= top
+                estabaDentro = array.get(zDentroPrev, i)
+                if tocaZona and not estabaDentro
+                    array.set(zToques, i, array.get(zToques, i) + 1)
+                array.set(zDentroPrev, i, tocaZona)
+                if tocaZona
+                    altoOB = math.max(top - bot, syminfo.mintick)
+                    penetracion = dz == 1 ? (top - low) / altoOB : (high - bot) / altoOB
+                    penetracion := math.min(1.0, math.max(0.0, penetracion))
+                    array.set(zPenMax, i, math.max(array.get(zPenMax, i), penetracion))
+
+            // Ciclo de vida del FVG asociado: abierto, mitigado al 50% o lleno.
+            estadoFVGActual = array.get(zFVGEstado, i)
+            if estadoFVGActual == 1 or estadoFVGActual == 2
+                gapTop = array.get(zFVGTop, i)
+                gapBot = array.get(zFVGBot, i)
+                altoGap = math.max(gapTop - gapBot, syminfo.mintick)
+                relleno = dz == 1 ? (gapTop - low) / altoGap : (high - gapBot) / altoGap
+                relleno := math.min(1.0, math.max(0.0, relleno))
+                nuevoEstadoFVG = relleno >= 1.0 ? 3 : relleno >= 0.5 ? 2 : 1
+                array.set(zFVGEstado, i, nuevoEstadoFVG)
+
+            if vencidaPorEdad or invalidada
+                // se resuelve ahora: congelar el ancho, pasar a estilo "historico"
+                array.set(zFresco, i, false)
+                array.set(zResuelveEn, i, bar_index)
+            else
+                // sigue viva: la caja crece una vela mas
+                box.set_right(array.get(cajas, i), bar_index)
+        // la vida fantasma se cuenta desde que se RESOLVIO, no desde que nacio --
+        // si no, una zona mitigada al instante quedaba dibujada casi tanto tiempo
+        // como una que tardo en resolverse, amontonando decenas de zonas fantasma
+        if not array.get(zFresco, i)
+            edadResuelta = bar_index - array.get(zResuelveEn, i)
+            borrar = not verTodo or edadResuelta > vidaFantasma
+            if borrar
+                box.delete(array.get(cajas, i))
+                array.remove(cajas, i)
+                array.remove(zDir, i)
+                array.remove(zTop, i)
+                array.remove(zBot, i)
+                array.remove(zNace, i)
+                array.remove(zFVG, i)
+                array.remove(zFresco, i)
+                array.remove(zResuelveEn, i)
+                array.remove(zVolS, i)
+                array.remove(zRngS, i)
+                array.remove(zLiqS, i)
+                array.remove(zBiasS, i)
+                array.remove(zFVGEstado, i)
+                array.remove(zFVGTop, i)
+                array.remove(zFVGBot, i)
+                array.remove(zToques, i)
+                array.remove(zPenMax, i)
+                array.remove(zDentroPrev, i)
+
+// ============================================================================
+// LIQUIDEZ: pivotes confirmados (donde suelen descansar stops) + clusters de
+// maximos/minimos "iguales" (varios pivotes casi al mismo precio = mas
+// liquidez acumulada ahi, el iman clasico de ICT). Una vez que el precio
+// BARRE el nivel (mecha lo supera y cierra de vuelta), se marca como
+// consumido y desaparece -- asi el grafico solo muestra liquidez pendiente,
+// no ya cazada.
+// ============================================================================
+liqPH = ta.pivothigh(high, liqLado, liqLado)
+liqPL = ta.pivotlow(low, liqLado, liqLado)
+
+var array<line>  liqLineasHi = array.new<line>()
+var array<int>   liqNaceHi   = array.new<int>()
+var array<int>   liqTocHi    = array.new<int>()   // cuantos pivotes cercanos = "iguales"
+var array<line>  liqLineasLo = array.new<line>()
+var array<int>   liqNaceLo   = array.new<int>()
+var array<int>   liqTocLo    = array.new<int>()
+var array<line>  liqGhost           = array.new<line>() // lineas ya barridas, en cuenta regresiva antes de borrarse
+var array<int>   liqGhostResuelveEn = array.new<int>()
+
+// La deteccion y el mantenimiento de niveles siempre se ejecutan. El input
+// mostrarLiq controla solamente los objetos visuales; ocultarlos no puede
+// cambiar el score de los OB.
+if not na(liqPH)
+    origen = bar_index - liqLado
+    // buscar si ya hay un nivel "igual" cerca -> engordar liquidez ahi
+    fusion = false
+    if array.size(liqNivelHi) > 0
+        for i = 0 to array.size(liqNivelHi) - 1
+            if math.abs(array.get(liqNivelHi, i) - liqPH) <= tolIguales
+                array.set(liqTocHi, i, array.get(liqTocHi, i) + 1)
+                n = array.get(liqTocHi, i)
+                lnExistente = array.get(liqLineasHi, i)
+                if not na(lnExistente)
+                    line.set_width(lnExistente, math.min(1 + n, 4))
+                    line.set_x2(lnExistente, bar_index)
+                fusion := true
+    if not fusion
+        line ln = mostrarLiq ? line.new(origen, liqPH, bar_index, liqPH, color = color.new(color.fuchsia, 20), style = line.style_dashed, width = 1) : na
+        array.push(liqLineasHi, ln)
+        array.push(liqNivelHi, liqPH)
+        array.push(liqNaceHi, origen)
+        array.push(liqTocHi, 1)
+
+if not na(liqPL)
+    origen = bar_index - liqLado
+    fusion = false
+    if array.size(liqNivelLo) > 0
+        for i = 0 to array.size(liqNivelLo) - 1
+            if math.abs(array.get(liqNivelLo, i) - liqPL) <= tolIguales
+                array.set(liqTocLo, i, array.get(liqTocLo, i) + 1)
+                n = array.get(liqTocLo, i)
+                lnExistente = array.get(liqLineasLo, i)
+                if not na(lnExistente)
+                    line.set_width(lnExistente, math.min(1 + n, 4))
+                    line.set_x2(lnExistente, bar_index)
+                fusion := true
+    if not fusion
+        line ln = mostrarLiq ? line.new(origen, liqPL, bar_index, liqPL, color = color.new(color.teal, 20), style = line.style_dashed, width = 1) : na
+        array.push(liqLineasLo, ln)
+        array.push(liqNivelLo, liqPL)
+        array.push(liqNaceLo, origen)
+        array.push(liqTocLo, 1)
+
+// barrido: la mecha supera el nivel y el CIERRE vuelve adentro -> se consume
+if array.size(liqNivelHi) > 0
+    for i = array.size(liqNivelHi) - 1 to 0
+        nivel = array.get(liqNivelHi, i)
+        barrido = high > nivel + tolIguales and close < nivel
+        vencido = bar_index - array.get(liqNaceHi, i) > liqEdadMax
+        if barrido or vencido
+            lnActual = array.get(liqLineasHi, i)
+            if not na(lnActual)
+                line.set_x2(lnActual, bar_index)
+            if barrido
+                if not na(lnActual)
+                    line.set_color(lnActual, color.new(color.fuchsia, 0))
+                    label.new(bar_index, nivel, "barrido", style = label.style_label_down, size = size.tiny, color = color.new(color.fuchsia, 60), textcolor = color.white)
+                // barrido de MAXIMOS favorece un OB BAJISTA a continuacion
+                array.push(sweepBar, bar_index)
+                array.push(sweepPrice, nivel)
+                array.push(sweepDir, -1)
+                if array.size(sweepBar) > 200
+                    array.shift(sweepBar)
+                    array.shift(sweepPrice)
+                    array.shift(sweepDir)
+                // se deja de rastrear activamente, pero se conserva un rato
+                // como "fantasma" (mismo criterio que las cajas de OB) para
+                // que se vea confirmado el barrido antes de desaparecer
+                if not na(lnActual)
+                    array.push(liqGhost, lnActual)
+                    array.push(liqGhostResuelveEn, bar_index)
+            else
+                // vencida sin barrer: no confirmo nada, se borra sin dejar rastro
+                if not na(lnActual)
+                    line.delete(lnActual)
+            array.remove(liqLineasHi, i)
+            array.remove(liqNivelHi, i)
+            array.remove(liqNaceHi, i)
+            array.remove(liqTocHi, i)
+
+if array.size(liqNivelLo) > 0
+    for i = array.size(liqNivelLo) - 1 to 0
+        nivel = array.get(liqNivelLo, i)
+        barrido = low < nivel - tolIguales and close > nivel
+        vencido = bar_index - array.get(liqNaceLo, i) > liqEdadMax
+        if barrido or vencido
+            lnActual = array.get(liqLineasLo, i)
+            if not na(lnActual)
+                line.set_x2(lnActual, bar_index)
+            if barrido
+                if not na(lnActual)
+                    line.set_color(lnActual, color.new(color.teal, 0))
+                    label.new(bar_index, nivel, "barrido", style = label.style_label_up, size = size.tiny, color = color.new(color.teal, 60), textcolor = color.white)
+                // barrido de MINIMOS favorece un OB ALCISTA a continuacion
+                array.push(sweepBar, bar_index)
+                array.push(sweepPrice, nivel)
+                array.push(sweepDir, 1)
+                if array.size(sweepBar) > 200
+                    array.shift(sweepBar)
+                    array.shift(sweepPrice)
+                    array.shift(sweepDir)
+                if not na(lnActual)
+                    array.push(liqGhost, lnActual)
+                    array.push(liqGhostResuelveEn, bar_index)
+            else
+                if not na(lnActual)
+                    line.delete(lnActual)
+            array.remove(liqLineasLo, i)
+            array.remove(liqNivelLo, i)
+            array.remove(liqNaceLo, i)
+            array.remove(liqTocLo, i)
+
+// limpieza de las lineas de liquidez "fantasma" (barridas), mismo criterio
+// de vida que las cajas de OB (vidaFantasma) para no dejarlas dibujadas para
+// siempre -- antes NUNCA se borraban (bug: se sacaban del array que las
+// rastreaba pero la linea seguia en el grafico indefinidamente)
+if array.size(liqGhost) > 0
+    for i = array.size(liqGhost) - 1 to 0
+        if bar_index - array.get(liqGhostResuelveEn, i) > vidaFantasma
+            line.delete(array.get(liqGhost, i))
+            array.remove(liqGhost, i)
+            array.remove(liqGhostResuelveEn, i)
+
+// ============================================================================
+// LIQUIDEZ PONDERADA + DOS CANDIDATOS DIRECCIONALES
+// La distancia, el numero de pivotes agrupados y el ATR determinan la
+// intensidad. El peligro domina al objetivo favorable cuando ambos existen.
+// ============================================================================
+fuerzaNivelLiq(distancia, distMax, toquesNivel, edadNivel) =>
+    cercania = distMax > 0 ? 1.0 - distancia / distMax : 0.0
+    cercania := math.min(1.0, math.max(0.0, cercania))
+    acumulacion = math.min(1.0, toquesNivel / 3.0)
+    vigencia = liqEdadMax > 0 ? 1.0 - math.min(1.0, edadNivel * 1.0 / liqEdadMax) * 0.50 : 1.0
+    (cercania * 0.65 + acumulacion * 0.35) * vigencia * 100.0
+
+liqComponentePonderadoDe(dir, top, bot) =>
+    alto = math.max(top - bot, syminfo.mintick)
+    distMax = math.max(alto * liqCercaPts, atrLiq * liqDistAtr)
+    peligroMax = 0.0
+    favorMax = liqScoreDe(dir, dir == 1 ? bot : top)
+
+    if dir == 1
+        if array.size(liqNivelLo) > 0
+            for i = 0 to array.size(liqNivelLo) - 1
+                nivel = array.get(liqNivelLo, i)
+                distancia = bot - nivel
+                if distancia >= 0 and distancia <= distMax
+                    peligroMax := math.max(peligroMax, fuerzaNivelLiq(distancia, distMax, array.get(liqTocLo, i), bar_index - array.get(liqNaceLo, i)))
+        if array.size(liqNivelHi) > 0
+            for i = 0 to array.size(liqNivelHi) - 1
+                nivel = array.get(liqNivelHi, i)
+                distancia = nivel - top
+                if distancia >= 0 and distancia <= distMax
+                    favorMax := math.max(favorMax, fuerzaNivelLiq(distancia, distMax, array.get(liqTocHi, i), bar_index - array.get(liqNaceHi, i)))
+    else
+        if array.size(liqNivelHi) > 0
+            for i = 0 to array.size(liqNivelHi) - 1
+                nivel = array.get(liqNivelHi, i)
+                distancia = nivel - top
+                if distancia >= 0 and distancia <= distMax
+                    peligroMax := math.max(peligroMax, fuerzaNivelLiq(distancia, distMax, array.get(liqTocHi, i), bar_index - array.get(liqNaceHi, i)))
+        if array.size(liqNivelLo) > 0
+            for i = 0 to array.size(liqNivelLo) - 1
+                nivel = array.get(liqNivelLo, i)
+                distancia = bot - nivel
+                if distancia >= 0 and distancia <= distMax
+                    favorMax := math.max(favorMax, fuerzaNivelLiq(distancia, distMax, array.get(liqTocLo, i), bar_index - array.get(liqNaceLo, i)))
+
+    resultado = peligroMax > 0 ? 50.0 * (1.0 - peligroMax / 100.0) : 50.0 + favorMax * 0.5
+    math.round(math.min(100.0, math.max(0.0, resultado)))
+
+fvgScoreEstadoDe(estado) =>
+    estado == 1 ? 100.0 : estado == 2 ? 50.0 : 0.0
+
+factorMitigacionDe(toques, penetracion) =>
+    if not penalizarMitigacion
+        1.0
+    else
+        factorToque = toques == 0 ? 1.0 : toques == 1 ? 0.90 : 0.75
+        factorPenetracion = 1.0 - math.min(1.0, math.max(0.0, penetracion)) * 0.25
+        factorToque * factorPenetracion
+
+textoZonaDe(fuerza, volS, rngS, liqS, biasS, fvgS, estadoFVG, toques, penetracion) =>
+    if not mostrarFuerza or na(fuerza)
+        ""
+    else
+        base = textoFuerzaDe(fuerza, volS, rngS, liqS, biasS, fvgS)
+        estadoOB = toques == 0 ? "FRESCO" : "T" + str.tostring(toques) + " P" + str.tostring(math.round(penetracion * 100.0)) + "%"
+        estadoGap = estadoFVG == 1 ? "FVG" : estadoFVG == 2 ? "FVG50" : estadoFVG == 3 ? "FVGx" : "sinFVG"
+        base + " · " + estadoOB + " · " + estadoGap
+
+distanciaAZona(precio, top, bot) =>
+    precio > top ? precio - top : precio < bot ? bot - precio : 0.0
+
+var int   idxOBCercanoAlc = -1
+var int   idxOBCercanoBaj = -1
+var float fuerzaOBCercanoAlc = na
+var float fuerzaOBCercanoBaj = na
+var float distanciaOBCercanoAlc = na
+var float distanciaOBCercanoBaj = na
+idxOBCercanoAlc := -1
+idxOBCercanoBaj := -1
+fuerzaOBCercanoAlc := na
+fuerzaOBCercanoBaj := na
+distanciaOBCercanoAlc := na
+distanciaOBCercanoBaj := na
+
+if array.size(cajas) > 0
+    for i = 0 to array.size(cajas) - 1
+        if array.get(zFresco, i)
+            dz = array.get(zDir, i)
+            distancia = distanciaAZona(close, array.get(zTop, i), array.get(zBot, i))
+            if dz == 1
+                if idxOBCercanoAlc == -1
+                    idxOBCercanoAlc := i
+                    distanciaOBCercanoAlc := distancia
+                else if distancia < distanciaOBCercanoAlc or (distancia == distanciaOBCercanoAlc and array.get(zNace, i) > array.get(zNace, idxOBCercanoAlc))
+                    idxOBCercanoAlc := i
+                    distanciaOBCercanoAlc := distancia
+            else
+                if idxOBCercanoBaj == -1
+                    idxOBCercanoBaj := i
+                    distanciaOBCercanoBaj := distancia
+                else if distancia < distanciaOBCercanoBaj or (distancia == distanciaOBCercanoBaj and array.get(zNace, i) > array.get(zNace, idxOBCercanoBaj))
+                    idxOBCercanoBaj := i
+                    distanciaOBCercanoBaj := distancia
+
+int zonasVisiblesAhora = 0
+int zonasOperablesAhora = 0
+if array.size(cajas) > 0
+    for i = 0 to array.size(cajas) - 1
+        caja = array.get(cajas, i)
+        dz = array.get(zDir, i)
+        viva = array.get(zFresco, i)
+        esCandidata = i == idxOBCercanoAlc or i == idxOBCercanoBaj
+
+        if esCandidata
+            array.set(zLiqS, i, liqComponentePonderadoDe(dz, array.get(zTop, i), array.get(zBot, i)))
+
+        estadoFVG = array.get(zFVGEstado, i)
+        fvgS = fvgScoreEstadoDe(estadoFVG)
+        fuerzaBase = combinarFuerza(array.get(zVolS, i), array.get(zRngS, i), array.get(zLiqS, i), array.get(zBiasS, i), fvgS)
+        factorEstado = factorMitigacionDe(array.get(zToques, i), array.get(zPenMax, i))
+        fuerzaActual = math.round(fuerzaBase * factorEstado)
+        cumpleFuerza = fuerzaMinima <= 0 or (not na(fuerzaActual) and fuerzaActual >= fuerzaMinima)
+
+        if i == idxOBCercanoAlc
+            fuerzaOBCercanoAlc := fuerzaActual
+        if i == idxOBCercanoBaj
+            fuerzaOBCercanoBaj := fuerzaActual
+
+        if cumpleFuerza
+            zonasVisiblesAhora += 1
+            fvgActivo = estadoFVG == 1 or estadoFVG == 2
+            if viva
+                zonasOperablesAhora += 1
+                colorBorde = fvgActivo ? (dz == 1 ? color.new(color.aqua, 10) : color.new(color.orange, 10)) : (dz == 1 ? color.new(color.lime, 30) : color.new(color.red, 30))
+                box.set_border_color(caja, colorBorde)
+                box.set_border_style(caja, line.style_solid)
+                box.set_border_width(caja, marcarCercano and esCandidata ? 3 : (fvgActivo ? 2 : 1))
+                transparencia = array.get(zToques, i) == 0 ? 85 : array.get(zToques, i) == 1 ? 89 : 92
+                box.set_bgcolor(caja, color.new(dz == 1 ? color.lime : color.red, transparencia))
+            else
+                box.set_border_color(caja, dz == 1 ? color.new(color.lime, 70) : color.new(color.red, 70))
+                box.set_border_style(caja, line.style_dotted)
+                box.set_border_width(caja, 1)
+                box.set_bgcolor(caja, color.new(dz == 1 ? color.lime : color.red, 95))
+            box.set_text(caja, textoZonaDe(fuerzaActual, array.get(zVolS, i), array.get(zRngS, i), array.get(zLiqS, i), array.get(zBiasS, i), fvgS, estadoFVG, array.get(zToques, i), array.get(zPenMax, i)))
+        else
+            box.set_border_color(caja, na)
+            box.set_bgcolor(caja, na)
+            box.set_text(caja, "")
+
+// ============================================================================
+// LINEA DE TENDENCIA ESTRUCTURAL (SOLO VISUAL)
+// Usa exclusivamente pivotes ya confirmados. Une dos minimos ascendentes o
+// dos maximos descendentes y conserva una sola linea activa para no recargar
+// el grafico. Una ruptura por cierre elimina la linea hasta que se confirme
+// una estructura nueva. No interviene en OB, FVG, liquidez ni score.
+// ============================================================================
+tendPH = ta.pivothigh(high, tendLado, tendLado)
+tendPL = ta.pivotlow(low, tendLado, tendLado)
+
+var float tendUltHi = na
+var int   tendUltHiBar = na
+var float tendUltLo = na
+var int   tendUltLoBar = na
+var line  lineaTendencia = na
+var int   tendenciaDir = 0
+
+// Primero se invalida la linea vigente usando el cierre actual. line.get_price
+// calcula el valor proyectado sin introducir informacion futura.
+if mostrarTendencia and not na(lineaTendencia)
+    valorLineaAhora = line.get_price(lineaTendencia, bar_index)
+    lineaRota = tendenciaDir == 1 ? close < valorLineaAhora : close > valorLineaAhora
+    if lineaRota
+        line.delete(lineaTendencia)
+        lineaTendencia := na
+        tendenciaDir := 0
+
+if not na(tendPL)
+    pivBarLo = bar_index - tendLado
+    if not na(tendUltLo) and tendPL > tendUltLo
+        if mostrarTendencia
+            if not na(lineaTendencia)
+                line.delete(lineaTendencia)
+            lineaTendencia := line.new(tendUltLoBar, tendUltLo, pivBarLo, tendPL,
+                 xloc=xloc.bar_index, extend=tendExtender ? extend.right : extend.none,
+                 color=tendColorAlcista, style=line.style_solid, width=1)
+            tendenciaDir := 1
+    tendUltLo := tendPL
+    tendUltLoBar := pivBarLo
+
+if not na(tendPH)
+    pivBarHi = bar_index - tendLado
+    if not na(tendUltHi) and tendPH < tendUltHi
+        if mostrarTendencia
+            if not na(lineaTendencia)
+                line.delete(lineaTendencia)
+            lineaTendencia := line.new(tendUltHiBar, tendUltHi, pivBarHi, tendPH,
+                 xloc=xloc.bar_index, extend=tendExtender ? extend.right : extend.none,
+                 color=tendColorBajista, style=line.style_solid, width=1)
+            tendenciaDir := -1
+    tendUltHi := tendPH
+    tendUltHiBar := pivBarHi
+
+// ---------------- sombreado de sesion ----------------
+enSesion = not na(time(timeframe.period, sesIni, "America/New_York"))
+bgcolor(mostrarSesion and enSesion ? color.new(color.blue, 92) : na)
+
+// ---------------- tabla resumen ----------------
+var table info = table.new(position.top_right, 1, 6, bgcolor = color.new(color.black, 70), border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "OB+FVG Visualizador v10", text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 1, "OB detectados: " + str.tostring(totalDetectadas), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 2, "Visibles: " + str.tostring(zonasVisiblesAhora) + " (vivos: " + str.tostring(zonasOperablesAhora) + ")", text_color = color.white, text_size = size.small)
+
+    textoAlc = "ALC: ninguno"
+    if idxOBCercanoAlc != -1
+        estadoAlc = array.get(zFVGEstado, idxOBCercanoAlc)
+        fvgAlcTxt = estadoAlc == 1 ? "FVG" : estadoAlc == 2 ? "FVG50" : estadoAlc == 3 ? "FVGx" : "sinFVG"
+        textoAlc := "ALC: " + (na(fuerzaOBCercanoAlc) ? "s/n" : str.tostring(fuerzaOBCercanoAlc) + "%") + " | " + str.tostring(distanciaOBCercanoAlc, "#.0") + "pts | T" + str.tostring(array.get(zToques, idxOBCercanoAlc)) + " | " + fvgAlcTxt
+
+    textoBaj = "BAJ: ninguno"
+    if idxOBCercanoBaj != -1
+        estadoBaj = array.get(zFVGEstado, idxOBCercanoBaj)
+        fvgBajTxt = estadoBaj == 1 ? "FVG" : estadoBaj == 2 ? "FVG50" : estadoBaj == 3 ? "FVGx" : "sinFVG"
+        textoBaj := "BAJ: " + (na(fuerzaOBCercanoBaj) ? "s/n" : str.tostring(fuerzaOBCercanoBaj) + "%") + " | " + str.tostring(distanciaOBCercanoBaj, "#.0") + "pts | T" + str.tostring(array.get(zToques, idxOBCercanoBaj)) + " | " + fvgBajTxt
+
+    textoTend = tendenciaDir == 1 ? "Tendencia: alcista" : tendenciaDir == -1 ? "Tendencia: bajista" : "Tendencia: sin linea activa"
+    table.cell(info, 0, 3, textoAlc, text_color = color.new(color.lime, 0), text_size = size.small)
+    table.cell(info, 0, 4, textoBaj, text_color = color.new(color.red, 0), text_size = size.small)
+    table.cell(info, 0, 5, textoTend, text_color = color.white, text_size = size.small)

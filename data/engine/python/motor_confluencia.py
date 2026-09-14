@@ -171,12 +171,140 @@ def zonas_pivote(H, L, n_lado=5, max_edad=200):
     return activos_por_vela
 
 
+# ============================================================================
+# SCORE DE FUERZA (0-100%) -- puerto directo de pine/pineV10.pine.
+# Combina 5 factores, cada uno conocido SIN mirar al futuro en el momento en
+# que la zona nace. Se usa como FILTRO de entrada: solo se opera si el score
+# supera min_score. Todo lo demas del motor no cambia.
+# ============================================================================
+def _resample_1h(bars):
+    """Velas de 1H a partir de las bars nativas (5m o 15m). Devuelve
+    (cierres_1h, lista de indices de bar NATIVO donde cada hora ya cerro)."""
+    seg = 3600
+    g = {}
+    for i, b in enumerate(bars):
+        k = b[0] - (b[0] % seg)
+        g.setdefault(k, []).append(i)
+    claves = sorted(g)
+    cierres = [bars[g[k][-1]][4] for k in claves]
+    cierra_en = [g[k][-1] for k in claves]  # indice NATIVO de la ultima vela de esa hora
+    return cierres, cierra_en
+
+
+def _bias_1h_causal(bars, sma_len=10):
+    """h1Bias[i] = signo(close_1h_confirmado - sma) de la hora YA CERRADA
+    antes de i. Replica close[1]+lookahead_on: siempre la hora anterior a
+    la que esta en curso en la vela i, nunca la corriente."""
+    n = len(bars)
+    cierres, cierra_en = _resample_1h(bars)
+    sma = [None] * len(cierres)
+    s = 0.0
+    for k in range(len(cierres)):
+        s += cierres[k]
+        if k >= sma_len:
+            s -= cierres[k - sma_len]
+        sma[k] = s / sma_len if k >= sma_len - 1 else None
+    bias = [0] * n
+    j = -1  # indice de la ultima hora 1h confirmada antes de i
+    for i in range(n):
+        while j + 1 < len(cierra_en) and cierra_en[j + 1] < i:
+            j += 1
+        if j >= 0 and sma[j] is not None:
+            bias[i] = 1 if cierres[j] > sma[j] else (-1 if cierres[j] < sma[j] else 0)
+    return bias
+
+
+def _vol_score(vol_ratio):
+    return min(100.0, max(0.0, (vol_ratio - 1.0) / 2.0 * 100))
+
+
+def _rng_score(rng_ratio, disp_mult):
+    return min(100.0, max(0.0, (rng_ratio - disp_mult) / disp_mult * 100))
+
+
+def _bias_score(dir_, bias):
+    if bias == 0:
+        return 50.0
+    return 100.0 if (dir_ == 1 and bias > 0) or (dir_ == -1 and bias < 0) else 0.0
+
+
+def _liq_favor_peligro(dir_, top, bot, piv_hi_vivos, piv_lo_vivos, dist_mult=3.0):
+    """piv_hi_vivos / piv_lo_vivos: listas de niveles de pivote SIN BARRER en
+    ese instante (ya confirmados, causal). Devuelve 100/50/0 igual que
+    liqComponenteDe en Pine: 0 si hay liquidez de invalidacion cerca, 100 si
+    hay liquidez a favor (iman) y no hay peligro, 50 si no hay senal clara."""
+    alto = max(top - bot, 0.01)
+    dist_max = alto * dist_mult
+    peligro = favor = False
+    if dir_ == 1:
+        for niv in piv_lo_vivos:
+            if bot - dist_max <= niv <= bot:
+                peligro = True
+        for niv in piv_hi_vivos:
+            if top <= niv <= top + dist_max:
+                favor = True
+    else:
+        for niv in piv_hi_vivos:
+            if top <= niv <= top + dist_max:
+                peligro = True
+        for niv in piv_lo_vivos:
+            if bot - dist_max <= niv <= bot:
+                favor = True
+    if peligro:
+        return 0.0
+    return 100.0 if favor else 50.0
+
+
+def calcular_scores(bars, ob, disp_mult=1.5, pivote_lado=8, dist_mult=3.0,
+                     bias_sma_len=10, usar_volumen=True):
+    """Devuelve, por vela con OB detectado, el score 0-100 y sus 4 componentes
+    (vol, rango, liquidez, sesgo -- el 5to, FVG, se aplica aparte porque
+    depende del estado de vida de la zona, no solo de la vela de nacimiento)."""
+    O = [b[1] for b in bars]; H = [b[2] for b in bars]
+    L = [b[3] for b in bars]; C = [b[4] for b in bars]
+    V = [b[5] if len(b) > 5 else 0 for b in bars]
+    n = len(bars)
+    avg = _avg_range(H, L, n)
+    avg_vol = _avg_range([0]*n, [0]*n, n)  # placeholder, se recalcula abajo
+    s = 0.0
+    avg_vol = [None]*n
+    for i in range(n):
+        s += V[i]
+        if i >= 20: s -= V[i-20]
+        avg_vol[i] = s/20 if i >= 19 else None
+    bias = _bias_1h_causal(bars, bias_sma_len)
+    piv_hi, piv_lo, conf = detectar_pivotes(H, L, pivote_lado)
+    # niveles vivos (confirmados, sin barrer) por vela -- se recorre una vez
+    vivos_hi, vivos_lo = [], []
+    activar_hi = {}; activar_lo = {}
+    for i in range(n):
+        if piv_hi[i] is not None: activar_hi.setdefault(conf[i], []).append(piv_hi[i])
+        if piv_lo[i] is not None: activar_lo.setdefault(conf[i], []).append(piv_lo[i])
+    cur_hi, cur_lo = [], []
+    scores = [None] * n
+    for i in range(n):
+        cur_hi.extend(activar_hi.get(i, [])); cur_lo.extend(activar_lo.get(i, []))
+        # barrido: se retira el nivel cuando el precio lo cruza y cierra de vuelta
+        cur_hi = [v for v in cur_hi if not (H[i] > v + 1.0 and C[i] < v)]
+        cur_lo = [v for v in cur_lo if not (L[i] < v - 1.0 and C[i] > v)]
+        if ob[i] is not None:
+            d0, top, bot = ob[i]
+            volS = _vol_score(V[i] / avg_vol[i]) if (usar_volumen and avg_vol[i]) else 50.0
+            rngS = _rng_score((H[i]-L[i]) / avg[i-1], disp_mult) if (i > 0 and avg[i-1]) else 50.0
+            liqS = _liq_favor_peligro(d0, top, bot, cur_hi, cur_lo, dist_mult)
+            biasS = _bias_score(d0, bias[i])
+            score = round(volS*0.30 + rngS*0.20 + liqS*0.20 + biasS*0.15 + 0.0*0.15)  # FVG=0 al nacer
+            scores[i] = (score, volS, rngS, liqS, biasS)
+    return scores
+
+
 def run(bars, ses_ini=480, ses_fin=720, disp_mult=2.0, disp_frac=0.6,
         entry_buf=8.0, sl_buf=2.0, cuerpo_frac=0.5, espera=8,
         rr1=1.5, rr2=6.0, be_trig=0.8, lock_r=0.3, risk_cap=100.0,
         exigir_fvg=False, exigir_pivote=False, pivote_tol=8.0, pivote_lado=5,
         edad_max=999, modo_ob="disp", bos_disp_mult=0.0, bos_scan=10,
-        breaker=False):
+        breaker=False, min_score=0, score_dist_mult=3.0, score_bias_sma=10,
+        score_usar_volumen=True):
     """modo_ob: 'disp'  = solo desplazamiento (el usado todo el dia de hoy)
                 'bos'   = solo ruptura de estructura confirmada (BOS)
                 'union' = displacement O bos (mas zonas, mas variado)
@@ -207,6 +335,15 @@ def run(bars, ses_ini=480, ses_fin=720, disp_mult=2.0, disp_frac=0.6,
     ob, fvg, pivs = _CACHE[key]
     if not exigir_fvg: fvg = [None] * n
 
+    score_key = key + (min_score, score_dist_mult, score_bias_sma, score_usar_volumen)
+    if min_score > 0:
+        if score_key not in _CACHE:
+            _CACHE[score_key] = calcular_scores(bars, ob, disp_mult, pivote_lado,
+                                                 score_dist_mult, score_bias_sma, score_usar_volumen)
+        scores = _CACHE[score_key]
+    else:
+        scores = None
+
     nym = []
     for t in T:
         d = datetime.fromtimestamp(t, tz=timezone.utc).astimezone(NY)
@@ -222,7 +359,9 @@ def run(bars, ses_ini=480, ses_fin=720, disp_mult=2.0, disp_frac=0.6,
     for i in range(n):
         if ob[i] is not None:
             d0, top, bot = ob[i]
-            vivas.append([d0, top, bot, i, False, False])
+            comps = scores[i] if (scores is not None and scores[i] is not None) else None
+            # [dir, top, bot, nacida, cleared, tiene_fvg_cerca, componentes(vol,rng,liq,bias)]
+            vivas.append([d0, top, bot, i, False, False, comps])
         if breaker:
             # BREAKER BLOCK: un OB alcista se invalida cuando el precio CIERRA
             # por debajo de su piso (no solo lo toca) -- la zona rota se
@@ -232,9 +371,9 @@ def run(bars, ses_ini=480, ses_fin=720, disp_mult=2.0, disp_frac=0.6,
             for z in vivas:
                 if z[4] or z[3] == i: continue  # solo zonas ya 'cleared' (tocadas)
                 if z[0] == 1 and C[i] < z[2]:
-                    nuevos_break.append([-1, z[2], z[1], i, False, False])
+                    nuevos_break.append([-1, z[2], z[1], i, False, False, None])
                 elif z[0] == -1 and C[i] > z[1]:
-                    nuevos_break.append([1, z[2], z[1], i, False, False])
+                    nuevos_break.append([1, z[2], z[1], i, False, False, None])
             vivas.extend(nuevos_break)
         if exigir_fvg and fvg[i] is not None:
             # el FVG de la vela i solo se conoce AHORA (usa i, i-1, i-2).
@@ -257,6 +396,12 @@ def run(bars, ses_ini=480, ses_fin=720, disp_mult=2.0, disp_frac=0.6,
                 for z in vivas:
                     if not z[4] or z[3] == i: continue
                     if exigir_fvg and not z[5]: continue
+                    if min_score > 0:
+                        if z[6] is None: continue
+                        _volS,_rngS,_liqS,_biasS = z[6][1],z[6][2],z[6][3],z[6][4]
+                        _fvgS = 100.0 if z[5] else 0.0
+                        _score = round(_volS*0.30 + _rngS*0.20 + _liqS*0.20 + _biasS*0.15 + _fvgS*0.15)
+                        if _score < min_score: continue
                     if z[0] == 1 and z[2] - entry_buf <= L[i] <= z[1] + entry_buf:
                         ok_piv = True
                         if exigir_pivote:
