@@ -1024,3 +1024,30 @@ sacrifica >75% de las operaciones por solo ~6% de mejora en PF. Conclusión:
 útil como filtro suave, no como filtro duro; para probar el score completo
 de 5 factores habría que instrumentar `v_nivel.py` con liquidez/FVG/sesgo
 igual que se hizo en el Pine — pendiente si se quiere profundizar.
+
+## ✅ SESIÓN 2026-09-14 (cierre) — visualizador aprobado v9
+
+El usuario aprobó la nueva versión como sensiblemente más precisa y útil para
+su operativa discrecional. La evolución v6→v9 incorporó:
+
+1. Liquidez contraria diferenciada de ausencia de señal: peligro 0, neutral
+   50, apoyo/objetivo favorable 100; reevaluación del OB vivo más cercano en
+   cada vela y resaltado sutil de esa caja.
+2. FVG conservado como confluencia de +15 puntos, nunca como requisito. La
+   opción `exigirFVG` existía pero no se aplicaba en v6; se retiró para reflejar
+   la decisión explícita de mostrar ambos tipos de OB.
+3. Detección de liquidez y FVG desacoplada de sus controles visuales, de modo
+   que ocultar líneas no altera resultados internos. Los barridos de la vela
+   actual se incorporan antes de reevaluar el score cercano.
+4. Corrección de la selección de vela origen para BOS alcista/bajista.
+5. Deduplicación revisada después de que una captura mostrara un OB+FVG válido
+   omitido por rozar una caja antigua. Cualquier solape dejó de ser suficiente:
+   ahora se exige 70% de la zona menor, configurable.
+6. Línea de tendencia estructural integrada, opcional y tenue: conecta mínimos
+   ascendentes o máximos descendentes ya confirmados, conserva una sola línea
+   activa y se elimina cuando el cierre la rompe. No afecta ninguna puntuación.
+
+Archivo canónico actualizado: `pine/OB_FVG_Visualizador.pine` (título interno
+`OB + FVG Visualizador v9`). La aprobación del usuario es visual/discrecional;
+no sustituye la validación causal pendiente del score completo ni convierte
+la línea estructural en una regla automática probada.

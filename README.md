@@ -5,7 +5,7 @@ futures, `CME_MINI_DL:MNQ1!`), backtesteada con un servidor MCP a medida
 (TradingView Desktop controlado vía CDP). Regla no negociable en todo el
 proyecto: **ningún backtest usa información futura del precio**.
 
-## Estado (actualizado 2026-09-10, noche)
+## Estado (actualizado 2026-09-14)
 
 > ## ⛔ La estrategia de 5m NO ES OPERABLE
 >
@@ -45,10 +45,13 @@ NinjaTrader todavía** — es el paso obligatorio antes de operar cualquiera.
   reales de NT8. Ningún archivo se copia a NinjaTrader sin pasar por aquí.
 - `pine/automation/ICT_5M_Scalp_v2_Strategy.cs` — estrategia de NT8 con
   registro CSV por evento en `Documents/NinjaTrader 8/export/`.
-- `pine/OB_FVG_Visualizador.pine` — indicador de auditoría visual: replica
-  exactamente la detección del motor de Python (OB, FVG, pivotes, zonas de
-  liquidez con "iguales") para revisar en TradingView, sin confiar
-  ciegamente en los números del backtest.
+- `pine/OB_FVG_Visualizador.pine` — visualizador v9 para auditoría discrecional
+  en TradingView. Detecta OB por desplazamiento/BOS, FVG, pivotes y liquidez
+  pendiente; puntúa cada zona con volumen, desplazamiento, liquidez, sesgo 1H
+  y FVG. Reevalúa la liquidez del OB vivo más cercano y añade una línea de
+  tendencia estructural opcional basada únicamente en pivotes confirmados.
+  Es una herramienta visual: el score y la línea de tendencia todavía no son
+  reglas validadas del backtester ni deben interpretarse como señal automática.
 
 ## Contenido
 

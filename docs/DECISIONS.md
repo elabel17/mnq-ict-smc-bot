@@ -39,6 +39,30 @@ reabrir debates ya resueltos en sesiones futuras.
   planea una suscripción de datos en tiempo real vía su cuenta fondeada —
   pendiente re-testear una vez activa.
 
+## Actualización 2026-09-14 — visualizador OB/FVG v9
+
+- **FVG es confluencia, no requisito.** Se muestran OB con y sin FVG. Un FVG
+  solapado aporta el componente FVG del score (15 puntos ponderados) y cambia
+  el contorno de la caja; no determina por sí solo si el OB existe.
+- **Liquidez del OB vivo más cercano:** su componente se reevalúa en cada
+  vela después de actualizar pivotes y barridos. Liquidez contraria = 0,
+  estado neutral = 50 y barrido/objetivo favorable = 100 dentro del componente
+  que pesa 20% del score. El riesgo contrario tiene prioridad.
+- **Cálculo separado de la visualización.** Ocultar las líneas de liquidez o
+  FVG no desactiva su detección ni cambia el score.
+- **Duplicados por solape sustancial.** Un contacto parcial ya no elimina un
+  OB nuevo. Por defecto se exige 70% de solape respecto de la zona menor para
+  tratar dos OB vivos de la misma dirección como duplicados; el umbral es
+  configurable.
+- **BOS corregido.** El BOS alcista toma la última vela bajista como origen y
+  el BOS bajista la última vela alcista.
+- **Línea estructural solo visual.** Une dos mínimos ascendentes o dos máximos
+  descendentes confirmados, mantiene una sola línea activa y la elimina ante
+  ruptura por cierre. No participa en detección, score ni backtest.
+- **Alcance de validación:** estos cambios fueron auditados visualmente y
+  revisados de forma estática. Aún no existe una validación estadística del
+  score completo ni de la línea estructural como reglas de entrada.
+
 ## Actualización 2026-09-08 — lockR 0.5R → 0.8R (v13)
 
 Tras reconstruir el histórico completo (136.049 velas, 2020-11 a 2026-09) y
