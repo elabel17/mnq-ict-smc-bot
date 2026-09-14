@@ -94,6 +94,28 @@ de 15m — cifra usada para verificar contra tres zonas que el usuario marcó
 manualmente en el gráfico, con coincidencia de precio y fecha en al menos
 dos de las tres.
 
+### Evolución del visualizador — v9 (2026-09-14)
+
+Tras nuevas revisiones sobre el gráfico de MNQ 5m se consolidaron estos
+criterios visuales:
+
+1. Se muestran tanto OB con FVG como OB sin FVG. El FVG es un bono de 15
+   puntos ponderados y una distinción de contorno, no un filtro obligatorio.
+2. El componente de liquidez distingue peligro (0), neutralidad (50) y apoyo
+   u objetivo favorable (100). Se recalcula cada vela para el OB vivo más
+   cercano, después de registrar los pivotes y barridos de la vela actual.
+3. La lógica de liquidez/FVG continúa activa aunque sus líneas se oculten.
+4. La deduplicación ya no descarta dos zonas por un contacto mínimo. El valor
+   predeterminado exige 70% de solape sobre la zona menor.
+5. Se corrigió la vela de origen en la rama BOS para cada dirección.
+6. Se añadió una única línea de tendencia estructural, tenue y opcional, que
+   usa pivotes confirmados y se invalida por cierre. Es estrictamente visual.
+
+El visualizador v9 amplía la auditoría discrecional y no es todavía una
+réplica exacta de reglas probadas en Python: ni el score completo ni la línea
+estructural se han validado como filtros rentables. Esta distinción evita
+convertir una mejora visual en una afirmación de rendimiento no demostrada.
+
 ## Pendiente
 
 - Verificar `sweep_reversion.py` (variante B) en NinjaTrader con predicción
