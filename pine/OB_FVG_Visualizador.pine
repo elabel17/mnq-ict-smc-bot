@@ -164,9 +164,28 @@ var array<bool>  zFVG    = array.new<bool>()
 var array<bool>  zFresco = array.new<bool>()   // true mientras el precio no la invalida (y, si aplicarFrescura esta activo, tambien dentro de edadMax)
 var array<int>   zResuelveEn = array.new<int>() // bar_index en que se congelo (mitigada/vencida), -1 mientras sigue viva
 
-// crear zona nueva si hubo OB esta vela
+// Evita crear una zona "duplicada": durante un solo tramo fuerte, varias
+// velas seguidas pueden superar el umbral de desplazamiento por separado
+// (cada una mide contra el rango promedio, no sabe que la vela anterior ya
+// disparo una zona) -- eso apilaba cajas superpuestas que en realidad son
+// la MISMA pierna, no OBs distintos. Si ya existe una zona viva (no
+// invalidada) de la misma direccion que se solapa en precio, se descarta la
+// nueva candidata y se deja la original (el origen real del movimiento).
+solapaZonaViva(dir, top, bot) =>
+    resultado = false
+    if array.size(cajas) > 0
+        for i = 0 to array.size(cajas) - 1
+            if array.get(zDir, i) == dir and array.get(zFresco, i)
+                exTop = array.get(zTop, i)
+                exBot = array.get(zBot, i)
+                if not (bot > exTop or top < exBot)
+                    resultado := true
+    resultado
+
+// crear zona nueva si hubo OB esta vela y no es duplicado de una ya viva
 var int totalDetectadas = 0
-if obDispDir != 0
+esDuplicado = obDispDir != 0 and solapaZonaViva(obDispDir, obDispTop, obDispBot)
+if obDispDir != 0 and not esDuplicado
     totalDetectadas += 1
     b = box.new(bar_index, obDispTop, bar_index, obDispBot,
          border_color = obDispDir == 1 ? color.new(color.lime, 30) : color.new(color.red, 30),
