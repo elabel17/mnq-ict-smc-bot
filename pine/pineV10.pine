@@ -178,6 +178,18 @@ var array<int>   sweepDir   = array.new<int>()
 var array<float> liqNivelHi = array.new<float>()
 var array<float> liqNivelLo = array.new<float>()
 
+// FVG detectados que todavia NO se vincularon a ningun OB (poblado en el
+// bloque de deteccion de FVG mas abajo). Necesarios porque el FVG suele
+// formarse ANTES de que la vela de desplazamiento confirme el OB -- sin
+// este historial, el vinculo solo se intentaba en el instante exacto en
+// que el hueco aparecia, y si el OB nacia unas velas despues (lo normal),
+// el FVG ya nunca se volvia a revisar y la zona quedaba "sinFVG" para
+// siempre aunque el hueco hubiera estado ahi todo el tiempo.
+var array<int>   fvgPendBar = array.new<int>()   // bar_index en que se detecto el FVG
+var array<float> fvgPendTop = array.new<float>()
+var array<float> fvgPendBot = array.new<float>()
+var array<int>   fvgPendDir = array.new<int>()
+
 liqScoreDe(dir, precio) =>
     resultado = 0.0
     if array.size(sweepBar) > 0
@@ -357,6 +369,7 @@ var array<float> zFVGBot = array.new<float>()
 var array<int>   zToques = array.new<int>()
 var array<float> zPenMax = array.new<float>()    // penetracion maxima del OB, 0..1
 var array<bool>  zDentroPrev = array.new<bool>() // evita contar varias velas de una misma visita como toques distintos
+var array<line>  zFVGLinea = array.new<line>()   // linea punteada del FVG vinculado, na hasta que se vincula uno
 
 // Evita duplicados de la MISMA pierna, pero permite OB distintos que solo se
 // tocan o solapan parcialmente. La version anterior descartaba la candidata
@@ -395,21 +408,55 @@ if obDispDir != 0 and not esDuplicado
          extend = extend.none,
          text = visibleInicial ? textoFuerza : "", text_size = size.tiny, text_color = chart.fg_color,
          text_halign = text.align_center, text_valign = text.align_center)
+    // buscar si hay un FVG PENDIENTE (formado ANTES, sin vincular todavia)
+    // que encaje con este OB nuevo -- mismo criterio que el vinculo hacia
+    // adelante (solape real o misma pierna), pero mirando hacia atras en
+    // el tiempo: lo normal es que el hueco se abra primero y la vela de
+    // desplazamiento que confirma el OB llegue unas velas despues
+    int fvgPendIdx = -1
+    float fvgPendDist = na
+    altoNuevoOB = math.max(obDispTop - obDispBot, syminfo.mintick)
+    if array.size(fvgPendBar) > 0
+        for j = 0 to array.size(fvgPendBar) - 1
+            if array.get(fvgPendDir, j) == obDispDir
+                pTop = array.get(fvgPendTop, j)
+                pBot = array.get(fvgPendBot, j)
+                solapaP = not (pBot > obDispTop or pTop < obDispBot)
+                distP = pBot > obDispTop ? pBot - obDispTop : obDispBot > pTop ? obDispBot - pTop : 0.0
+                mismaPiernaP = bar_index - array.get(fvgPendBar, j) <= fvgVinculoVelas and distP <= altoNuevoOB * fvgDistZona
+                if solapaP or mismaPiernaP
+                    if fvgPendIdx == -1 or distP < fvgPendDist
+                        fvgPendIdx := j
+                        fvgPendDist := distP
+    vieneConFVG = fvgPendIdx != -1
+
     array.push(cajas, b)
     array.push(zDir, obDispDir)
     array.push(zTop, obDispTop)
     array.push(zBot, obDispBot)
     array.push(zNace, bar_index)
-    array.push(zFVG, false)
+    array.push(zFVG, vieneConFVG)
     array.push(zFresco, true)
     array.push(zResuelveEn, -1)
     array.push(zVolS, obVolS)
     array.push(zRngS, obRngS)
     array.push(zLiqS, obLiqS)
     array.push(zBiasS, obBiasS)
-    array.push(zFVGEstado, 0)
-    array.push(zFVGTop, na)
-    array.push(zFVGBot, na)
+    array.push(zFVGEstado, vieneConFVG ? 1 : 0)
+    array.push(zFVGTop, vieneConFVG ? array.get(fvgPendTop, fvgPendIdx) : na)
+    array.push(zFVGBot, vieneConFVG ? array.get(fvgPendBot, fvgPendIdx) : na)
+    if vieneConFVG
+        precioLineaP = obDispDir == 1 ? array.get(fvgPendBot, fvgPendIdx) : array.get(fvgPendTop, fvgPendIdx)
+        colorLineaP = obDispDir == 1 ? color.new(color.aqua, 40) : color.new(color.orange, 40)
+        barFVGP = array.get(fvgPendBar, fvgPendIdx)
+        lnP = mostrarFVG ? line.new(barFVGP - 2, precioLineaP, barFVGP, precioLineaP, color = colorLineaP, style = line.style_dotted, width = 2) : na
+        array.push(zFVGLinea, lnP)
+        array.remove(fvgPendBar, fvgPendIdx)
+        array.remove(fvgPendTop, fvgPendIdx)
+        array.remove(fvgPendBot, fvgPendIdx)
+        array.remove(fvgPendDir, fvgPendIdx)
+    else
+        array.push(zFVGLinea, na)
     array.push(zToques, 0)
     array.push(zPenMax, 0.0)
     array.push(zDentroPrev, false)
@@ -444,11 +491,24 @@ if (fvgAlcista or fvgBajista) and array.size(cajas) > 0
         array.set(zFVGEstado, mejorZonaFVG, 1)
         array.set(zFVGTop, mejorZonaFVG, fTop)
         array.set(zFVGBot, mejorZonaFVG, fBot)
-
-if mostrarFVG and fvgAlcista
-    line.new(bar_index[2], high[2], bar_index, high[2], color = color.new(color.aqua, 40), style = line.style_dotted, width = 2)
-if mostrarFVG and fvgBajista
-    line.new(bar_index[2], low[2], bar_index, low[2], color = color.new(color.orange, 40), style = line.style_dotted, width = 2)
+        if mostrarFVG
+            precioLinea = fvgAlcista ? fBot : fTop
+            colorLinea = fvgAlcista ? color.new(color.aqua, 40) : color.new(color.orange, 40)
+            ln = line.new(bar_index[2], precioLinea, bar_index, precioLinea, color = colorLinea, style = line.style_dotted, width = 2)
+            array.set(zFVGLinea, mejorZonaFVG, ln)
+    else
+        // no hay ningun OB vivo todavia que encaje con este hueco -- se
+        // guarda como pendiente por si el OB se confirma unas velas despues
+        // (lo normal: primero el hueco, despues la vela de desplazamiento)
+        array.push(fvgPendBar, bar_index)
+        array.push(fvgPendTop, fTop)
+        array.push(fvgPendBot, fBot)
+        array.push(fvgPendDir, fd)
+        if array.size(fvgPendBar) > 100
+            array.shift(fvgPendBar)
+            array.shift(fvgPendTop)
+            array.shift(fvgPendBot)
+            array.shift(fvgPendDir)
 
 // La caja SOLO crece mientras la zona sigue viva de verdad (igual que en
 // Python: cleared -> touchable -> consumida). En cuanto se resuelve -- se
@@ -505,6 +565,9 @@ if array.size(cajas) > 0
             borrar = not verTodo or edadResuelta > vidaFantasma
             if borrar
                 box.delete(array.get(cajas, i))
+                lineaFVGZona = array.get(zFVGLinea, i)
+                if not na(lineaFVGZona)
+                    line.delete(lineaFVGZona)
                 array.remove(cajas, i)
                 array.remove(zDir, i)
                 array.remove(zTop, i)
@@ -520,6 +583,7 @@ if array.size(cajas) > 0
                 array.remove(zFVGEstado, i)
                 array.remove(zFVGTop, i)
                 array.remove(zFVGBot, i)
+                array.remove(zFVGLinea, i)
                 array.remove(zToques, i)
                 array.remove(zPenMax, i)
                 array.remove(zDentroPrev, i)
