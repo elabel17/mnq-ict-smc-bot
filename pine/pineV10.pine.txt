@@ -608,49 +608,67 @@ var array<int>   liqTocLo    = array.new<int>()
 var array<line>  liqGhost           = array.new<line>() // lineas ya barridas, en cuenta regresiva antes de borrarse
 var array<int>   liqGhostResuelveEn = array.new<int>()
 
+// Marca visual de CUMULO (2+ pivotes "iguales" agrupados) -- una franja
+// dorada corta con etiqueta, DISTINTA de las lineas individuales de cada
+// pivote (que ahora ya no se fusionan/absorben en una sola, se conservan
+// todas). Cumulo y liquidez individual son dos senales distintas para el
+// usuario: cuantos niveles casi iguales hay agrupados (mas peso) vs cuantos
+// niveles sueltos hay en fila (mas cobertura de precio). Se dibuja una vez
+// por cada vez que un cumulo crece (no se actualiza in-place), asi que un
+// cumulo que sigue creciendo deja varias franjas cortas superpuestas en su
+// propio historial -- aceptable, no un objeto persistente que administrar.
+marcarCumulo(minP, maxP, n) =>
+    box.new(bar_index - 2, maxP, bar_index + 6, minP, border_color = color.new(color.yellow, 20),
+         bgcolor = color.new(color.yellow, 70), extend = extend.none)
+    label.new(bar_index + 6, (maxP + minP) / 2, "cúmulo x" + str.tostring(n),
+         style = label.style_label_left, size = size.tiny,
+         color = color.new(color.yellow, 40), textcolor = color.black)
+
 // La deteccion y el mantenimiento de niveles siempre se ejecutan. El input
 // mostrarLiq controla solamente los objetos visuales; ocultarlos no puede
 // cambiar el score de los OB.
 if not na(liqPH)
     origen = bar_index - liqLado
-    // buscar si ya hay un nivel "igual" cerca -> engordar liquidez ahi
-    fusion = false
+    // cuantos niveles VIVOS (sin barrer) hay ya cerca de este -- ya no se
+    // fusionan en una sola linea, cada pivote conserva la suya propia
+    // ("liquidez seguida"); esto solo mide si tambien forman un "cumulo"
+    cluster = 0
+    clusterMin = liqPH
+    clusterMax = liqPH
     if array.size(liqNivelHi) > 0
         for i = 0 to array.size(liqNivelHi) - 1
             if math.abs(array.get(liqNivelHi, i) - liqPH) <= tolIguales
+                cluster += 1
+                clusterMin := math.min(clusterMin, array.get(liqNivelHi, i))
+                clusterMax := math.max(clusterMax, array.get(liqNivelHi, i))
                 array.set(liqTocHi, i, array.get(liqTocHi, i) + 1)
-                n = array.get(liqTocHi, i)
-                lnExistente = array.get(liqLineasHi, i)
-                if not na(lnExistente)
-                    line.set_width(lnExistente, math.min(1 + n, 4))
-                    line.set_x2(lnExistente, bar_index)
-                fusion := true
-    if not fusion
-        line ln = mostrarLiq ? line.new(origen, liqPH, bar_index, liqPH, color = color.new(color.fuchsia, 20), style = line.style_dashed, width = 1) : na
-        array.push(liqLineasHi, ln)
-        array.push(liqNivelHi, liqPH)
-        array.push(liqNaceHi, origen)
-        array.push(liqTocHi, 1)
+    line ln = mostrarLiq ? line.new(origen, liqPH, bar_index, liqPH, color = color.new(color.fuchsia, 20), style = line.style_dashed, width = 1) : na
+    array.push(liqLineasHi, ln)
+    array.push(liqNivelHi, liqPH)
+    array.push(liqNaceHi, origen)
+    array.push(liqTocHi, cluster + 1)
+    if mostrarLiq and cluster >= 1
+        marcarCumulo(math.min(clusterMin, liqPH), math.max(clusterMax, liqPH), cluster + 1)
 
 if not na(liqPL)
     origen = bar_index - liqLado
-    fusion = false
+    cluster = 0
+    clusterMin = liqPL
+    clusterMax = liqPL
     if array.size(liqNivelLo) > 0
         for i = 0 to array.size(liqNivelLo) - 1
             if math.abs(array.get(liqNivelLo, i) - liqPL) <= tolIguales
+                cluster += 1
+                clusterMin := math.min(clusterMin, array.get(liqNivelLo, i))
+                clusterMax := math.max(clusterMax, array.get(liqNivelLo, i))
                 array.set(liqTocLo, i, array.get(liqTocLo, i) + 1)
-                n = array.get(liqTocLo, i)
-                lnExistente = array.get(liqLineasLo, i)
-                if not na(lnExistente)
-                    line.set_width(lnExistente, math.min(1 + n, 4))
-                    line.set_x2(lnExistente, bar_index)
-                fusion := true
-    if not fusion
-        line ln = mostrarLiq ? line.new(origen, liqPL, bar_index, liqPL, color = color.new(color.teal, 20), style = line.style_dashed, width = 1) : na
-        array.push(liqLineasLo, ln)
-        array.push(liqNivelLo, liqPL)
-        array.push(liqNaceLo, origen)
-        array.push(liqTocLo, 1)
+    line ln = mostrarLiq ? line.new(origen, liqPL, bar_index, liqPL, color = color.new(color.teal, 20), style = line.style_dashed, width = 1) : na
+    array.push(liqLineasLo, ln)
+    array.push(liqNivelLo, liqPL)
+    array.push(liqNaceLo, origen)
+    array.push(liqTocLo, cluster + 1)
+    if mostrarLiq and cluster >= 1
+        marcarCumulo(math.min(clusterMin, liqPL), math.max(clusterMax, liqPL), cluster + 1)
 
 // barrido: la mecha supera el nivel y el CIERRE vuelve adentro -> se consume
 if array.size(liqNivelHi) > 0
