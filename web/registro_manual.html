@@ -47,6 +47,7 @@
   <header>
     <h1>Registro manual de entradas</h1>
     <p>Haz clic en el gráfico donde tú habrías entrado. Marca dirección, precio y por qué — se guarda para que Claude lo analice.</p>
+    <p style="color:var(--accent);font-weight:600;margin-top:4px">🕐 El eje del gráfico ahora muestra hora NY (America/New_York), no UTC.</p>
   </header>
   <div class="main">
     <div id="chart"></div>
@@ -89,6 +90,29 @@ function toNY(epochSeconds){
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
 }
 
+// La libreria del grafico (lightweight-charts) SIEMPRE renderiza el eje de
+// tiempo en UTC (usa getUTCHours/getUTCMonth/etc en su codigo, verificado
+// directamente en el bundle -- no hay forma de configurarla para mostrar
+// otro huso). Eso causaba que el eje se leyera como si fuera hora NY,
+// llevando a confusiones reales (ej. 12-2pm en el eje son en realidad
+// 08-10am NY en septiembre). Truco estandar para este problema: se le
+// "miente" a la libreria sumandole el offset de NY a cada timestamp antes
+// de dibujarlo -- como ella renderiza en UTC, el resultado visual termina
+// siendo la hora NY real. maneja DST automaticamente via Intl.
+function nyOffsetSeconds(utcEpochSeconds){
+  const d = new Date(utcEpochSeconds * 1000);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", timeZoneName: "shortOffset"
+  }).formatToParts(d);
+  const tz = parts.find(p => p.type === "timeZoneName").value; // ej "GMT-4"
+  const m = tz.match(/GMT([+-]\d+)/);
+  const horas = m ? parseInt(m[1], 10) : -5;
+  return horas * 3600;
+}
+function toChartTime(utcEpochSeconds){ return utcEpochSeconds + nyOffsetSeconds(utcEpochSeconds); }
+function fromChartTime(chartEpochSeconds){ return chartEpochSeconds - nyOffsetSeconds(chartEpochSeconds);
+}
+
 function loadLocal(){ try { return JSON.parse(localStorage.getItem("registro_manual") || "{}"); } catch(e){ return {}; } }
 function saveLocal(){ try { localStorage.setItem("registro_manual", JSON.stringify(entradas)); } catch(e){} }
 
@@ -116,10 +140,11 @@ function initChart(){
     if (!param.time || !param.point) return;
     const precio = candleSeries.coordinateToPrice(param.point.y);
     if (precio == null) return;
-    pendiente = { time: param.time };
+    const realUtc = fromChartTime(param.time); // param.time viene en "hora de grafico" (NY disfrazada de UTC)
+    pendiente = { time: realUtc };
     document.getElementById("pendingInfo").textContent =
-      "Vela seleccionada: " + toNY(param.time) + " hora NY  (" +
-      new Date(param.time * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC)";
+      "Vela seleccionada: " + toNY(realUtc) + " hora NY  (" +
+      new Date(realUtc * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC)";
     document.getElementById("precioInput").value = precio.toFixed(2);
     document.getElementById("precioInput").disabled = false;
     document.getElementById("motivoInput").disabled = false;
@@ -128,7 +153,7 @@ function initChart(){
   window.addEventListener("resize", () => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }));
 }
 
-function barsToCandles(bars){ return bars.map(b => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4] })); }
+function barsToCandles(bars){ return bars.map(b => ({ time: toChartTime(b[0]), open: b[1], high: b[2], low: b[3], close: b[4] })); }
 
 function actualizarBotonGuardar(){
   const ok = pendiente && dirElegida && document.getElementById("precioInput").value && document.getElementById("motivoInput").value.trim();
@@ -203,7 +228,7 @@ function renderMarkers(){
   markers = ids.map(id => {
     const e = entradas[id];
     return {
-      time: e.time, position: e.dir === "LONG" ? "belowBar" : "aboveBar",
+      time: toChartTime(e.time), position: e.dir === "LONG" ? "belowBar" : "aboveBar",
       color: e.dir === "LONG" ? "#3fb950" : "#f85149",
       shape: e.dir === "LONG" ? "arrowUp" : "arrowDown",
       text: e.dir,
