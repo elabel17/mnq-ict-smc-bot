@@ -1,0 +1,263 @@
+<title>Variante F — Auditoria de Trades</title>
+<style>
+  :root{
+    --bg:#0e1117; --panel:#161b22; --border:#2a3140; --text:#e6edf3; --muted:#8b96a5;
+    --green:#3fb950; --red:#f85149; --orange:#d29922; --accent:#58a6ff;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#f6f8fa; --panel:#ffffff; --border:#d0d7de; --text:#1f2328; --muted:#57606a;
+    }
+  }
+  :root[data-theme="dark"]{ --bg:#0e1117; --panel:#161b22; --border:#2a3140; --text:#e6edf3; --muted:#8b96a5; }
+  *{box-sizing:border-box}
+  body{background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:0}
+  .wrap{display:flex; flex-direction:column; height:100vh; min-height:600px}
+  header{padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+  header h1{font-size:15px; margin:0; font-weight:600}
+  header .stat{font-size:12px; color:var(--muted)}
+  .tf-btn{background:var(--panel); border:1px solid var(--border); color:var(--text); padding:4px 10px; border-radius:6px; font-size:12px; cursor:pointer}
+  .tf-btn.active{background:var(--accent); color:#fff; border-color:var(--accent)}
+  .main{display:flex; flex:1; min-height:0}
+  #chart{flex:1; min-width:0}
+  aside{width:300px; border-left:1px solid var(--border); overflow-y:auto; flex-shrink:0}
+  .trade-item{padding:8px 12px; border-bottom:1px solid var(--border); cursor:pointer; font-size:12px}
+  .trade-item:hover{background:var(--panel)}
+  .trade-item.selected{background:var(--panel); border-left:3px solid var(--accent)}
+  .trade-item .row1{display:flex; justify-content:space-between; align-items:center; margin-bottom:2px}
+  .dir-badge{font-size:10px; padding:1px 6px; border-radius:4px; font-weight:700}
+  .dir-long{background:rgba(63,185,80,.2); color:var(--green)}
+  .dir-short{background:rgba(248,81,73,.2); color:var(--red)}
+  .motivo{font-size:10px; padding:1px 6px; border-radius:4px}
+  .m-tp2{background:rgba(63,185,80,.2); color:var(--green)}
+  .m-stop{background:rgba(248,81,73,.2); color:var(--red)}
+  .m-be{background:rgba(210,153,34,.2); color:var(--orange)}
+  .m-sin{background:rgba(139,148,165,.2); color:var(--muted)}
+  .pnl{font-weight:700}
+  .pnl.pos{color:var(--green)} .pnl.neg{color:var(--red)}
+  .flag-row{display:flex; gap:4px; margin-top:6px}
+  .flag-btn{flex:1; font-size:10px; padding:3px 0; border-radius:4px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer}
+  .flag-btn.on-good{background:rgba(63,185,80,.25); border-color:var(--green); color:var(--green)}
+  .flag-btn.on-bad{background:rgba(248,81,73,.25); border-color:var(--red); color:var(--red)}
+  .note-box{width:100%; margin-top:6px; background:var(--bg); border:1px solid var(--border); color:var(--text);
+    font-size:11px; font-family:inherit; border-radius:4px; padding:5px 6px; resize:vertical; min-height:32px}
+  .note-box::placeholder{color:var(--muted)}
+  .note-saved{font-size:9px; color:var(--muted); margin-top:2px; height:11px}
+  .summary{padding:10px 16px; border-top:1px solid var(--border); font-size:12px; color:var(--muted); display:flex; gap:16px; flex-wrap:wrap}
+  .summary b{color:var(--text)}
+  .legend{font-size:11px; color:var(--muted); display:flex; gap:10px; align-items:center; margin-left:auto}
+  .legend span{display:flex; align-items:center; gap:4px}
+  .dot{width:8px; height:8px; border-radius:50%; display:inline-block}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Variante F — Union+FVG, sin edad, liquidez a favor</h1>
+    <span class="stat" id="hdrStat">cargando...</span>
+    <div style="display:flex;gap:6px;margin-left:8px">
+      <button class="tf-btn" data-tf="5m">5m</button>
+      <button class="tf-btn active" data-tf="15m">15m</button>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:#58a6ff"></span>entrada</span>
+      <span><span class="dot" style="background:#f85149"></span>stop inicial</span>
+      <span><span class="dot" style="background:#3fb950"></span>target 4R</span>
+      <span><span class="dot" style="background:#d29922"></span>salida real</span>
+    </div>
+  </header>
+  <div class="main">
+    <div id="chart"></div>
+    <aside id="tradeList"></aside>
+  </div>
+  <div class="summary" id="summary"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+let DATA5 = null, DATA15 = null;
+let currentTf = "15m";
+let chart, candleSeries;
+let db = null;
+let notes = {};   // tradeId -> { flag, note }
+let localOnly = false;
+
+// localStorage como respaldo si el usuario abre esto sin sesion (db == null)
+function loadLocalNotes(){ try { return JSON.parse(localStorage.getItem("varF_notes") || "{}"); } catch(e){ return {}; } }
+function saveLocalNotes(){ try { localStorage.setItem("varF_notes", JSON.stringify(notes)); } catch(e){} }
+
+function tradeId(s){ return s.replace(" ", "T"); }
+
+async function initDb(){
+  try {
+    db = await claude.use("db");
+  } catch(e) { db = null; }
+  if (!db){
+    localOnly = true;
+    notes = loadLocalNotes();
+    return;
+  }
+  const snap = await db.collection("notes").get();
+  snap.docs.forEach(d => { notes[d.id] = d.data(); });
+}
+
+let saveTimers = {};
+function scheduleSaveNote(id, patch){
+  notes[id] = { ...(notes[id]||{}), ...patch };
+  if (localOnly){ saveLocalNotes(); return; }
+  clearTimeout(saveTimers[id]);
+  saveTimers[id] = setTimeout(() => {
+    db.doc("notes/" + id).set(notes[id]).catch(() => {});
+  }, 600);
+}
+
+function toUnixSec(s){
+  // "YYYY-MM-DD HH:MM:SS" -> unix seconds (UTC, igual que los timestamps de las barras)
+  return Math.floor(Date.parse(s.replace(" ","T")+"Z")/1000);
+}
+
+function initChart(){
+  const el = document.getElementById("chart");
+  chart = LightweightCharts.createChart(el, {
+    layout: { background: { color: "transparent" }, textColor: "#8b96a5" },
+    grid: { vertLines: { color: "rgba(255,255,255,0.05)" }, horzLines: { color: "rgba(255,255,255,0.05)" } },
+    timeScale: { timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: "rgba(255,255,255,0.1)" },
+    autoSize: true,
+  });
+  candleSeries = chart.addCandlestickSeries({
+    upColor: "#3fb950", downColor: "#f85149", borderVisible: false,
+    wickUpColor: "#3fb950", wickDownColor: "#f85149",
+  });
+  window.addEventListener("resize", () => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }));
+}
+
+function barsToCandles(bars){
+  return bars.map(b => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4] }));
+}
+
+let priceLines = [];
+function clearPriceLines(){ priceLines.forEach(pl => candleSeries.removePriceLine(pl)); priceLines = []; }
+
+function motivoClass(m){
+  if (m === "TP2") return "m-tp2";
+  if (m === "STOP") return "m-stop";
+  if (m === "BE") return "m-be";
+  return "m-sin";
+}
+function motivoLabel(m){
+  return { TP2: "Target 4R", STOP: "Stop original", BE: "Breakeven" }[m] || "Sin resolver";
+}
+
+function calcPnl(t, qty=3){
+  if (!t.resuelto) return null;
+  const slip = 0.5, PV = 2.0;
+  return ((t.exit - t.ep) * t.dir - slip) * PV * qty - 1.0 * qty * 2;
+}
+
+function renderList(data){
+  const list = document.getElementById("tradeList");
+  list.innerHTML = "";
+  data.trades.forEach((t, i) => {
+    const pnl = calcPnl(t);
+    const id = tradeId(t.s);
+    const rec = notes[id] || {};
+    const div = document.createElement("div");
+    div.className = "trade-item";
+    div.dataset.idx = i;
+    div.innerHTML = `
+      <div class="row1">
+        <span><span class="dir-badge ${t.dir===1?'dir-long':'dir-short'}">${t.dir===1?'LONG':'SHORT'}</span> ${t.s.slice(0,10)}</span>
+        <span class="pnl ${pnl>0?'pos':(pnl<0?'neg':'')}">${pnl!==null ? (pnl>=0?'+':'') + '$' + pnl.toFixed(0) : '—'}</span>
+      </div>
+      <div style="color:var(--muted)">${t.s.slice(11)}  ·  entry ${t.ep}</div>
+      <span class="motivo ${motivoClass(t.motivo)}">${motivoLabel(t.motivo)}</span>
+      <div class="flag-row">
+        <button class="flag-btn ${rec.flag==='good'?'on-good':''}" data-flag="good">Válido</button>
+        <button class="flag-btn ${rec.flag==='bad'?'on-bad':''}" data-flag="bad">No debí</button>
+      </div>
+      <textarea class="note-box" placeholder="Nota para Claude sobre este trade...">${rec.note || ""}</textarea>
+      <div class="note-saved"></div>`;
+    div.addEventListener("click", (ev) => {
+      if (ev.target.closest(".flag-btn") || ev.target.closest(".note-box")) return;
+      selectTrade(i);
+    });
+    div.querySelectorAll(".flag-btn").forEach(btn => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const f = btn.dataset.flag;
+        const newFlag = (rec.flag === f) ? "" : f;
+        scheduleSaveNote(id, { s: t.s, flag: newFlag, note: rec.note || "" });
+        renderList(currentTf === "5m" ? DATA5 : DATA15);
+        renderSummary();
+      });
+    });
+    const textarea = div.querySelector(".note-box");
+    const savedTag = div.querySelector(".note-saved");
+    textarea.addEventListener("input", () => {
+      scheduleSaveNote(id, { s: t.s, flag: rec.flag || "", note: textarea.value });
+      savedTag.textContent = "guardando...";
+      clearTimeout(textarea._tag);
+      textarea._tag = setTimeout(() => { savedTag.textContent = "guardado"; }, 700);
+    });
+    list.appendChild(div);
+  });
+}
+
+function selectTrade(i){
+  const data = currentTf === "5m" ? DATA5 : DATA15;
+  const t = data.trades[i];
+  document.querySelectorAll(".trade-item").forEach(el => el.classList.toggle("selected", +el.dataset.idx === i));
+  clearPriceLines();
+  priceLines.push(candleSeries.createPriceLine({ price: t.ep, color: "#58a6ff", lineWidth: 2, lineStyle: 0, title: "entrada" }));
+  priceLines.push(candleSeries.createPriceLine({ price: t.sl0, color: "#f85149", lineWidth: 1, lineStyle: 2, title: "stop" }));
+  priceLines.push(candleSeries.createPriceLine({ price: t.tp, color: "#3fb950", lineWidth: 1, lineStyle: 2, title: "target 4R" }));
+  if (t.resuelto){
+    priceLines.push(candleSeries.createPriceLine({ price: t.exit, color: "#d29922", lineWidth: 2, lineStyle: 0, title: "salida real" }));
+  }
+  const tEntry = toUnixSec(t.s);
+  chart.timeScale().setVisibleRange({ from: tEntry - 3600*10, to: tEntry + 3600*14 });
+}
+
+function renderSummary(){
+  const data = currentTf === "5m" ? DATA5 : DATA15;
+  let good=0, bad=0, unflagged=0, withNote=0;
+  data.trades.forEach(t => {
+    const rec = notes[tradeId(t.s)] || {};
+    if (rec.flag === "good") good++; else if (rec.flag === "bad") bad++; else unflagged++;
+    if (rec.note && rec.note.trim()) withNote++;
+  });
+  document.getElementById("summary").innerHTML =
+    `<span>Total: <b>${data.trades.length}</b></span>` +
+    `<span>Marcados válidos: <b style="color:#3fb950">${good}</b></span>` +
+    `<span>Marcados "no debí": <b style="color:#f85149">${bad}</b></span>` +
+    `<span>Sin marcar: <b>${unflagged}</b></span>` +
+    `<span>Con nota: <b>${withNote}</b></span>` +
+    `<span style="margin-left:auto">${localOnly ? "Guardado solo en este navegador (sin sesion compartida)" : "Guardado — Claude puede leer estas notas directamente"}</span>`;
+}
+
+function loadTf(tf){
+  currentTf = tf;
+  document.querySelectorAll(".tf-btn").forEach(b => b.classList.toggle("active", b.dataset.tf === tf));
+  const data = tf === "5m" ? DATA5 : DATA15;
+  candleSeries.setData(barsToCandles(data.bars));
+  document.getElementById("hdrStat").textContent =
+    `${data.bars.length.toLocaleString()} velas de ${tf} · ${data.trades.length} operaciones · sep-dic 2025 (MNQ, derivado de ticks reales)`;
+  renderList(data);
+  renderSummary();
+  if (data.trades.length) selectTrade(0);
+}
+
+document.querySelectorAll(".tf-btn").forEach(b => b.addEventListener("click", () => loadTf(b.dataset.tf)));
+
+initChart();
+Promise.all([
+  fetch("variante_f_visual_data_15m.json").then(r => r.json()),
+  fetch("variante_f_visual_data_5m.json").then(r => r.json()).catch(() => null),
+  initDb(),
+]).then(([d15, d5]) => {
+  DATA15 = d15;
+  DATA5 = d5;
+  if (!DATA5) document.querySelector('[data-tf="5m"]').style.display = "none";
+  loadTf("15m");
+});
+</script>

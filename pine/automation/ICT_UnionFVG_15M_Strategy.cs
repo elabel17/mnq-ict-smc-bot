@@ -13,13 +13,15 @@ using NinjaTrader.NinjaScript.Strategies;
 // ============================================================================
 // ICT Union+FVG 15M — NinjaScript
 //
-// Puerto de data/engine/python/motor_confluencia.py, configuracion
-// "union+FVG, 08-13 NY", la unica linea del proyecto verificada tick a tick
-// (no solo por vela) contra datos reales de NinjaTrader (sep-dic 2025):
-//     24 operaciones, neto $3.060, PF 2.43, WR ~71% (3 contratos)
-// El modelo por vela sobreestimaba esto en +43% ($5.402, PF 3.18) -- la
-// correccion viene de resolver el orden real dentro de cada vela con ticks,
-// exactamente lo que hace esta estrategia con el gatillo de BE.
+// Puerto de data/engine/python/experimentos_liquidez.py, variante F: "sin
+// limite de edad + liquidez a favor" -- la configuracion mas rentable
+// encontrada en todo el proyecto, verificada tick a tick contra datos reales
+// (sep-dic 2025):
+//     54/55 operaciones, neto $4.213, PF 2.12, WR ~74% (3 contratos)
+// Reemplaza la version anterior de este archivo (EdadMaxVelas=12, sin gate
+// de liquidez: 24 operaciones, $3.060, PF 2.43) -- esa configuracion queda
+// disponible bajando EdadMaxVelas a 12 y ExigirLiquidezFavor a false, pero
+// la variante F es la que gana en frecuencia y PF combinados.
 //
 // DETECCION (modo "union"): un Order Block nace por CUALQUIERA de dos vias:
 //   a) desplazamiento -- vela con rango >= dispMult x rango promedio,
@@ -28,32 +30,60 @@ using NinjaTrader.NinjaScript.Strategies;
 //   b) BOS de estructura interna -- ruptura por cierre de un pivote interno
 //      (PivLado velas a cada lado), usando la ultima vela opuesta como origen.
 // Ambas se conocen SOLO al cerrar la vela que las genera. Nada mira al futuro.
+// NOTA: se audito visualmente contra un usuario real y el BOS ocasionalmente
+// entra en zonas debiles (sin desplazamiento real detras) -- probado en
+// Python agregarle los mismos filtros que el desplazamiento, mejora el PF de
+// vela (2.59) pero empata o pierde levemente contra tick real ($3.531 vs
+// $4.213) -- no se incluyo aqui, queda pendiente con mas muestra.
 //
 // CONFLUENCIA FVG: la zona debe tener un Fair Value Gap (hueco de 3 velas)
 // de la misma direccion solapado con ella, detectado en cualquier vela
 // posterior a su nacimiento (nunca antes -- el hueco de la vela actual solo
 // se aplica hacia zonas YA vivas, jamas hacia el futuro).
 //
-// FRESCURA: la zona deja de ser operable a los EdadMaxVelas de nacida
-// (12 velas de 15m = 3 horas). Es el filtro individual mas potente
-// encontrado en todo el proyecto.
+// FRESCURA: EdadMaxVelas=0 (sin limite) -- la zona vive hasta que se toca,
+// sin importar cuanto tiempo pase. Reemplaza la frescura de 3 horas de la
+// version anterior: probado en Python, quitar el limite de tiempo y exigir
+// en su lugar liquidez a favor real duplica la frecuencia sin perder PF.
+// IMPORTANTE: a diferencia de versiones anteriores de este archivo, las
+// zonas NO se invalidan por cierre en contra -- solo por edad (si
+// EdadMaxVelas>0) o por tocarse. Se probo agregar invalidacion por cierre
+// sobre esta variante sin edad y colapso de 55 a 1 operacion en Python
+// (casi toda zona termina siendo cruzada por el precio alguna vez en meses
+// de historial) -- es una incompatibilidad real entre ambas reglas, no un
+// descuido.
+//
+// LIQUIDEZ A FAVOR (ExigirLiquidezFavor): puerto de
+// motor_confluencia._liq_favor_peligro -- exige que haya un pivote
+// confirmado y sin barrer actuando de iman en la direccion del trade (y
+// ninguno actuando de riesgo de invalidacion cerca) antes de armar la zona.
+// Es el ingrediente que permitio quitar la frescura por tiempo sin perder
+// calidad.
 //
 // ENTRADA POR CONFIRMACION: cuando el precio toca la zona (dentro de
 // EntryBufferPts), se "arma". Si dentro de EsperaVelas aparece una vela de
 // reaccion (cuerpo >= CuerpoFrac del rango, cerrando mas alla del borde de
 // la zona en el sentido del trade), se entra A MERCADO en OnBarClose de esa
 // vela -- no es una orden limite descansando, es una confirmacion real.
+// Probado en Python entrar SIN esperar confirmacion: triplica las
+// operaciones pero el PF cae de 2.59 a 1.58 y el drawdown casi se triplica
+// -- la espera de confirmacion se queda.
 //
 // GESTION: TP2 = RR2 x riesgo. El gatillo de BE (BeTriggerR) se evalua
 // INTRATICK, en una serie secundaria de 1 tick -- a vela cerrada, el 12,5%
 // de las operaciones (verificado con datos reales) resolvian mal el orden
 // entre el gatillo y el stop original, cobrando ganancias que nunca
-// existieron. LockR SIEMPRE debe ser menor que BeTriggerR.
+// existieron. LockR SIEMPRE debe ser menor que BeTriggerR. Probado en
+// Python quitar el gatillo temprano (0.4R): empeora en las 4 variantes
+// probadas (con y sin cierre parcial) -- se queda como esta. Probado cerrar
+// parcial en RR1 antes de RR2: resultado practicamente identico ($4.034 vs
+// $4.213) -- no aporta, no se incluyo por simplicidad.
 //
-// ESTADO: NO PROBADO EN NINJATRADER TODAVIA. Verificado en Python contra
-// tick data real (sep-dic 2025), pero nunca ha ejecutado una orden en la
-// plataforma. Correr en Sim y comparar contra el CSV antes de cualquier
-// cuenta real.
+// ESTADO: la deteccion, gate de liquidez y gestion estan verificados tick a
+// tick en Python. Este archivo especifico (la integracion en NinjaScript)
+// TODAVIA no ha ejecutado una orden real en la plataforma. Correr en Sim o
+// Market Replay y comparar el CSV contra el resultado de Python antes de
+// cualquier cuenta real.
 // ============================================================================
 
 namespace NinjaTrader.NinjaScript.Strategies
@@ -89,10 +119,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         public int LiqAccumBars { get; set; }
         [NinjaScriptProperty] [Display(Name="Velas a cada lado del pivote (BOS)", Order=8, GroupName="3. Deteccion OB")]
         public int PivLado { get; set; }
-        [NinjaScriptProperty] [Display(Name="Frescura operable (velas)", Order=9, GroupName="3. Deteccion OB")]
+        [NinjaScriptProperty] [Display(Name="Frescura operable en velas (0 = sin limite, variante validada)", Order=9, GroupName="3. Deteccion OB")]
         public int EdadMaxVelas { get; set; }
         [NinjaScriptProperty] [Display(Name="Exigir confluencia FVG", Order=10, GroupName="3. Deteccion OB")]
         public bool ExigirFVG { get; set; }
+        [NinjaScriptProperty] [Display(Name="Exigir liquidez a FAVOR cerca (variante validada tick a tick)", Order=14, GroupName="3. Deteccion OB")]
+        public bool ExigirLiquidezFavor { get; set; }
+        [NinjaScriptProperty] [Display(Name="Distancia liquidez favor/peligro (x altura de zona)", Order=15, GroupName="3. Deteccion OB")]
+        public double DistMultLiq { get; set; }
         [NinjaScriptProperty] [Display(Name="Margen de entrada (pts)", Order=11, GroupName="3. Deteccion OB")]
         public double EntryBufferPts { get; set; }
         [NinjaScriptProperty] [Display(Name="Buffer SL (pts)", Order=12, GroupName="3. Deteccion OB")]
@@ -137,8 +171,20 @@ namespace NinjaTrader.NinjaScript.Strategies
         private readonly List<Zone> zonas = new List<Zone>();
         private long zoneSeq = 0;
 
+        // contadores de diagnostico -- para saber SIN esperar un trade si el
+        // problema es "no hay setups" o "el replay no ha avanzado" o un bug real
+        private long cntZonaNueva = 0, cntArmados = 0, cntConfirmados = 0;
+        private int ultHeartbeatBar = -1;
+
         // pivotes internos (para BOS): el ultimo alto/bajo confirmado
         private double ultPivHi = double.NaN, ultPivLo = double.NaN;
+
+        // niveles de liquidez VIVOS (para el gate favor/peligro) -- distinto de
+        // ultPivHi/Lo (que solo guardan el ULTIMO para BOS): aqui se acumulan
+        // todos los pivotes confirmados y sin barrer, igual que en Python
+        // (motor_confluencia._liq_favor_peligro / experimentos_liquidez.py).
+        private readonly List<double> pivHiVivos = new List<double>();
+        private readonly List<double> pivLoVivos = new List<double>();
 
         // vela armada esperando confirmacion
         private long armId = -1; private int armDir = 0; private int armBar = -1;
@@ -257,7 +303,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 DispLen = 20; DispMult = 1.5; DispCloseFrac = 0.6; ObScanBars = 10;
                 LiqCheckBars = 12; LiqTolerancePts = 4.0; LiqAccumBars = 6;
-                PivLado = 2; EdadMaxVelas = 12; ExigirFVG = true;
+                // EdadMaxVelas = 0 (sin limite) + ExigirLiquidezFavor = true es la
+                // variante F, la UNICA verificada tick a tick sin degradarse:
+                // 54/55 operaciones, neto $4.213, PF 2.12 (sep-dic 2025, 3 contratos).
+                // Es una configuracion DISTINTA a la primera version de este archivo
+                // (que usaba EdadMaxVelas=12, PF 2.43 con 24 operaciones) -- esta
+                // reemplaza a esa, no la complementa.
+                PivLado = 2; EdadMaxVelas = 0; ExigirFVG = true;
+                ExigirLiquidezFavor = true; DistMultLiq = 3.0;
                 EntryBufferPts = 12.0; SlBufferPts = 2.0; MaxRiskPts = 100.0;
 
                 CuerpoFrac = 0.4; EsperaVelas = 8;
@@ -266,7 +319,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // encima del precio y el broker lo rechaza (ya nos paso una vez).
                 RR2 = 4.0; BeTriggerR = 0.4; LockR = 0.2;
 
-                SessionStartHour = 8; SessionEndHour = 13;
+                // Sin restriccion horaria por defecto (0-24): para diagnosticar si el
+                // filtro de sesion 08-13 estaba tapando todo por un desfase de huso
+                // horario. El CSV registra ny_time en cada evento -- el filtro de
+                // 08-13 se aplica DESPUES, sobre el CSV, no aqui.
+                SessionStartHour = 0; SessionEndHour = 24;
 
                 WriteCsvLog = true;
                 CsvFolder   = @"C:\Users\diazl\Documents\NinjaTrader 8\export";
@@ -316,8 +373,43 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (High[c - k] >= candHi || High[c + k] >= candHi) esPivHi = false;
                 if (Low[c - k]  <= candLo || Low[c + k]  <= candLo) esPivLo = false;
             }
-            if (esPivHi) ultPivHi = candHi;
-            if (esPivLo) ultPivLo = candLo;
+            if (esPivHi) { ultPivHi = candHi; pivHiVivos.Add(candHi); }
+            if (esPivLo) { ultPivLo = candLo; pivLoVivos.Add(candLo); }
+
+            // barrido: se retira el nivel cuando el precio lo cruza y cierra de vuelta
+            // (idem cur_hi/cur_lo en motor_confluencia.calcular_scores)
+            for (int k = pivHiVivos.Count - 1; k >= 0; k--)
+            {
+                double v = pivHiVivos[k];
+                if (High[0] > v + 1.0 && Close[0] < v) pivHiVivos.RemoveAt(k);
+            }
+            for (int k = pivLoVivos.Count - 1; k >= 0; k--)
+            {
+                double v = pivLoVivos[k];
+                if (Low[0] < v - 1.0 && Close[0] > v) pivLoVivos.RemoveAt(k);
+            }
+        }
+
+        // Liquidez a favor/peligro -- puerto de motor_confluencia._liq_favor_peligro.
+        // 0 = hay liquidez de invalidacion cerca (peligro); 100 = hay liquidez iman
+        // a favor y no hay peligro; 50 = sin señal clara.
+        private double LiqFavorPeligro(int dir, double top, double bot)
+        {
+            double alto = Math.Max(top - bot, 0.01);
+            double distMax = alto * DistMultLiq;
+            bool peligro = false, favor = false;
+            if (dir == 1)
+            {
+                foreach (double niv in pivLoVivos) if (niv >= bot - distMax && niv <= bot) peligro = true;
+                foreach (double niv in pivHiVivos) if (niv >= top && niv <= top + distMax) favor = true;
+            }
+            else
+            {
+                foreach (double niv in pivHiVivos) if (niv >= top && niv <= top + distMax) peligro = true;
+                foreach (double niv in pivLoVivos) if (niv >= bot - distMax && niv <= bot) favor = true;
+            }
+            if (peligro) return 0.0;
+            return favor ? 100.0 : 50.0;
         }
 
         // busca la ultima vela opuesta dentro de ObScanBars velas atras
@@ -435,8 +527,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 var z = new Zone { Dir = nuevoDir, Top = nuevoTop, Bot = nuevoBot,
                                     Born = CurrentBar, Cleared = false, TieneFVG = false, Id = ++zoneSeq };
                 zonas.Add(z);
+                cntZonaNueva++;
                 Log("ZONA_NUEVA", nuevoDir == 1 ? "LONG" : "SHORT", nuevoTop, nuevoBot, 0, 0,
                     "zona " + z.Id.ToString(INV));
+            }
+
+            // ---------- latido de diagnostico: cada 50 velas (~12.5h de 15m) ----------
+            if (CurrentBar - ultHeartbeatBar >= 50)
+            {
+                ultHeartbeatBar = CurrentBar;
+                Log("HEARTBEAT", "", Close[0], 0, 0, 0,
+                    "bar=" + CurrentBar.ToString(INV) +
+                    " zonas_creadas=" + cntZonaNueva.ToString(INV) +
+                    " armados=" + cntArmados.ToString(INV) +
+                    " confirmados=" + cntConfirmados.ToString(INV) +
+                    " zonas_vivas=" + zonas.Count.ToString(INV) +
+                    " ny=" + nyNow.ToString("yyyy-MM-dd HH:mm", INV));
             }
 
             // ---------- FVG: hueco de 3 velas, se conoce AHORA (usa [0],[1],[2]) ----------
@@ -458,12 +564,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             // TIENE que ir antes de cualquier return, igual que en el motor de
             // Python: si se salta con posicion abierta, zonas ya resueltas
             // sobreviven y se vuelven a operar despues.
+            // IMPORTANTE: el motor de Python validado (motor_confluencia.run() y
+            // experimentos_liquidez.simular()) NUNCA invalida una zona por cierre
+            // en contra -- solo por edad. Se probo agregar esa invalidacion sobre
+            // la variante sin limite de edad y colapso de 55 a 1 operacion (casi
+            // toda zona termina siendo cruzada por el precio al menos una vez en
+            // meses de historial). Por eso aqui NO se invalida por cierre; con
+            // EdadMaxVelas=0 la zona vive hasta que se toca, punto.
             for (int i = zonas.Count - 1; i >= 0; i--)
             {
                 var z = zonas[i];
-                bool invalidada = z.Dir == 1 ? Close[0] < z.Bot : Close[0] > z.Top;
-                bool vencida = (CurrentBar - z.Born) > EdadMaxVelas;
-                if (invalidada || vencida) { zonas.RemoveAt(i); continue; }
+                bool vencida = EdadMaxVelas > 0 && (CurrentBar - z.Born) > EdadMaxVelas;
+                if (vencida) { zonas.RemoveAt(i); continue; }
             }
 
             // ---------- red de seguridad: exceso de contratos ----------
@@ -507,10 +619,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     if (z.Born == CurrentBar) continue;
                     if (ExigirFVG && !z.TieneFVG) continue;
+                    if (ExigirLiquidezFavor && LiqFavorPeligro(z.Dir, z.Top, z.Bot) != 100.0) continue;
                     if (z.Dir == 1 && z.Bot - EntryBufferPts <= Low[0] && Low[0] <= z.Top + EntryBufferPts)
-                    { armId = z.Id; armDir = 1; armTop = z.Top; armBot = z.Bot; armBar = CurrentBar; break; }
+                    { armId = z.Id; armDir = 1; armTop = z.Top; armBot = z.Bot; armBar = CurrentBar;
+                      cntArmados++; Log("ARMADO", "LONG", Close[0], 0, 0, 0, "zona " + z.Id.ToString(INV)); break; }
                     if (z.Dir == -1 && z.Bot - EntryBufferPts <= High[0] && High[0] <= z.Top + EntryBufferPts)
-                    { armId = z.Id; armDir = -1; armTop = z.Top; armBot = z.Bot; armBar = CurrentBar; break; }
+                    { armId = z.Id; armDir = -1; armTop = z.Top; armBot = z.Bot; armBar = CurrentBar;
+                      cntArmados++; Log("ARMADO", "SHORT", Close[0], 0, 0, 0, "zona " + z.Id.ToString(INV)); break; }
                 }
             }
             else if (CurrentBar - armBar > EsperaVelas)
@@ -536,6 +651,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                             plannedDir = 1; fillPrice = ep; activeStop = sl; riskPts = r;
                             targetPx = ep + r * RR2; entrySignal = "L" + armId.ToString(INV);
                             entryBar = CurrentBar; beMoved = false; inPosition = true; armId = -1;
+                            cntConfirmados++;
                         }
                     }
                     else if (armDir == -1 && Close[0] < Open[0] && cuerpo >= CuerpoFrac * rango && Close[0] < armBot)
@@ -549,6 +665,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                             plannedDir = -1; fillPrice = ep; activeStop = sl; riskPts = r;
                             targetPx = ep - r * RR2; entrySignal = "S" + armId.ToString(INV);
                             entryBar = CurrentBar; beMoved = false; inPosition = true; armId = -1;
+                            cntConfirmados++;
                         }
                     }
                 }

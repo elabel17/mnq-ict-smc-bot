@@ -1,0 +1,340 @@
+//@version=6
+// ============================================================================
+// ICT Union(disp+BOS)+FVG + Liquidez a Favor -- SIN limite de edad de zona
+//
+// Puerto de data/engine/python/experimentos_liquidez.py, variante F, la
+// UNICA de toda la ronda de pruebas de liquidez que sobrevivio la
+// verificacion tick a tick: 54/55 operaciones resueltas, PF 2.12 real
+// (sep-dic 2025, MNQ). Sube la frecuencia respecto a la config anterior de
+// 3h de frescura (29 ops) al doble (54-55 ops) sin perder calidad, porque
+// cambia el criterio de "cuando una zona sigue viva": ya no es tiempo, es
+// liquidez a favor confirmada + zona sin tocar (la heuristica manual del
+// usuario, no un numero de horas inventado).
+//
+// ADVERTENCIA -- Pine Strategy Tester tiene la MISMA ambiguedad de "que paso
+// primero, el stop o el target dentro de la misma vela" que se corrigio con
+// datos de tick real en Python/NinjaTrader. Sin "Bar Replay"/tick real
+// activado, los numeros que muestre ESTE script en su propio backtester
+// pueden estar inflados igual que lo estuvo el modelo por vela en Python.
+// Usar esto para AUDITAR SEÑALES Y ALERTAS EN VIVO, no para confiar en el
+// Net Profit que reporte el Strategy Tester de TradingView sin mas.
+// ============================================================================
+strategy("ICT UnionFVG + Liquidez a Favor (sin edad, validado tick)",
+     overlay=true, default_qty_type=strategy.fixed, default_qty_value=3,
+     pyramiding=0, calc_on_every_tick=false,
+     commission_type=strategy.commission.cash_per_contract, commission_value=1.0,
+     slippage=2, initial_capital=50000)
+
+// ---------------- inputs ----------------
+grpDet = "Deteccion OB"
+dispLen       = input.int(20, "Velas rango promedio", group=grpDet)
+dispMult      = input.float(1.5, "Umbral desplazamiento (x rango prom.)", group=grpDet)
+dispCloseFrac = input.float(0.6, "Fraccion cierre direccional", group=grpDet)
+obScanBars    = input.int(10, "Velas atras vela origen", group=grpDet)
+liqCheckBars  = input.int(12, "Ventana liquidez limpia detras del OB", group=grpDet)
+liqTolPts     = input.float(4.0, "Tolerancia liquidez (pts)", group=grpDet)
+liqAccumBars  = input.int(6, "Racha que invalida liquidez", group=grpDet)
+pivLado       = input.int(2, "Velas a cada lado del pivote (BOS + favor/peligro)", group=grpDet)
+exigirFVG     = input.bool(true, "Exigir confluencia FVG", group=grpDet)
+
+grpLiq = "Liquidez a favor (gate -- reemplaza la frescura por tiempo)"
+distMultLiq   = input.float(3.0, "Distancia favor/peligro (x altura de zona)", group=grpLiq)
+exigirFavor   = input.bool(true, "Exigir liquidez a FAVOR cerca (variante F)", group=grpLiq)
+excluirPeligro= input.bool(true, "Excluir si hay liquidez de PELIGRO cerca", group=grpLiq)
+
+grpEnt = "Entrada"
+entryBuf   = input.float(12.0, "Margen de entrada (pts)", group=grpEnt)
+slBuf      = input.float(2.0, "Buffer SL (pts)", group=grpEnt)
+maxRiskPts = input.float(100.0, "Tope de riesgo (pts)", group=grpEnt)
+cuerpoFrac = input.float(0.4, "Cuerpo minimo confirmacion (fraccion rango)", group=grpEnt)
+esperaVelas= input.int(8, "Velas de espera tras armar", group=grpEnt)
+
+grpGes = "Gestion (verificado tick a tick: RR2=4.0, BE 0.4R/0.2R)"
+rr2     = input.float(4.0, "TP (multiplo R)", group=grpGes)
+beTrigR = input.float(0.4, "Gatillo BE (multiplo R)", group=grpGes)
+lockR   = input.float(0.2, "Ganancia asegurada al mover a BE (multiplo R)", group=grpGes)
+
+grpSes = "Sesion (0,24 = sin filtro, igual al historico tick-verificado)"
+sesionInicio = input.int(0, "Hora inicio NY", group=grpSes)
+sesionFin    = input.int(24, "Hora fin NY (exclusiva)", group=grpSes)
+
+grpVis = "Visual"
+mostrarZonas = input.bool(true, "Dibujar zonas OB", group=grpVis)
+mostrarLiq   = input.bool(true, "Dibujar niveles de liquidez (pivotes vivos)", group=grpVis)
+
+// ---------------- tipos ----------------
+type Zona
+    int   dir
+    float top
+    float bot
+    bool  tieneFVG
+    int   id
+    box   caja = na
+
+var array<Zona> zonas = array.new<Zona>()
+var int zoneSeq = 0
+
+// ---------------- rango promedio (causal: usa la vela previa) ----------------
+rng = high - low
+avgRange = ta.sma(rng, dispLen)
+avgPrev = avgRange[1]
+
+// ---------------- pivotes internos: BOS + niveles de liquidez vivos ----------------
+pivHi = ta.pivothigh(high, pivLado, pivLado)
+pivLo = ta.pivotlow(low, pivLado, pivLado)
+
+var float ultPivHi = na
+var float ultPivLo = na
+if not na(pivHi)
+    ultPivHi := pivHi
+if not na(pivLo)
+    ultPivLo := pivLo
+
+var array<float> pivHiVivos = array.new<float>()
+var array<float> pivLoVivos = array.new<float>()
+var array<line>  pivHiLineas = array.new<line>()
+var array<line>  pivLoLineas = array.new<line>()
+
+if not na(pivHi)
+    array.push(pivHiVivos, pivHi)
+    array.push(pivHiLineas, mostrarLiq ? line.new(bar_index - pivLado, pivHi, bar_index, pivHi, color=color.new(color.red, 40), width=1) : na)
+if not na(pivLo)
+    array.push(pivLoVivos, pivLo)
+    array.push(pivLoLineas, mostrarLiq ? line.new(bar_index - pivLado, pivLo, bar_index, pivLo, color=color.new(color.lime, 40), width=1) : na)
+
+if array.size(pivHiVivos) > 0
+    for i = array.size(pivHiVivos) - 1 to 0
+        v = array.get(pivHiVivos, i)
+        if high > v + 1.0 and close < v
+            array.remove(pivHiVivos, i)
+            array.remove(pivHiLineas, i)
+        else if mostrarLiq
+            line.set_x2(array.get(pivHiLineas, i), bar_index)
+if array.size(pivLoVivos) > 0
+    for i = array.size(pivLoVivos) - 1 to 0
+        v = array.get(pivLoVivos, i)
+        if low < v - 1.0 and close > v
+            array.remove(pivLoVivos, i)
+            array.remove(pivLoLineas, i)
+        else if mostrarLiq
+            line.set_x2(array.get(pivLoLineas, i), bar_index)
+
+// ---------------- funciones de deteccion ----------------
+buscarOrigen(bool alcista) =>
+    int idx = -1
+    for k = 1 to obScanBars
+        if alcista and close[k] < open[k]
+            idx := k
+            break
+        if not alcista and close[k] > open[k]
+            idx := k
+            break
+    idx
+
+liquidezLimpia(bool alcista, float cand, int idxOrigen) =>
+    int mx = 0
+    int cu = 0
+    for j = idxOrigen + 1 to idxOrigen + liqCheckBars
+        bool cerca = alcista ? low[j] <= cand + liqTolPts : high[j] >= cand - liqTolPts
+        if cerca
+            cu += 1
+            mx := math.max(mx, cu)
+        else
+            cu := 0
+    mx < liqAccumBars
+
+liqFavorPeligro(int dir_, float top, float bot) =>
+    float alto = math.max(top - bot, 0.01)
+    float distMax = alto * distMultLiq
+    bool peligro = false
+    bool favor = false
+    if dir_ == 1
+        if array.size(pivLoVivos) > 0
+            for i = 0 to array.size(pivLoVivos) - 1
+                niv = array.get(pivLoVivos, i)
+                if niv >= bot - distMax and niv <= bot
+                    peligro := true
+        if array.size(pivHiVivos) > 0
+            for i = 0 to array.size(pivHiVivos) - 1
+                niv = array.get(pivHiVivos, i)
+                if niv >= top and niv <= top + distMax
+                    favor := true
+    else
+        if array.size(pivHiVivos) > 0
+            for i = 0 to array.size(pivHiVivos) - 1
+                niv = array.get(pivHiVivos, i)
+                if niv >= top and niv <= top + distMax
+                    peligro := true
+        if array.size(pivLoVivos) > 0
+            for i = 0 to array.size(pivLoVivos) - 1
+                niv = array.get(pivLoVivos, i)
+                if niv >= bot - distMax and niv <= bot
+                    favor := true
+    peligro ? 0 : (favor ? 100 : 50)
+
+// ---------------- deteccion OB: desplazamiento union BOS ----------------
+bool isDisp   = not na(avgPrev) and avgPrev > 0 and rng >= dispMult * avgPrev
+bool bullDisp = isDisp and close > open and (close - low) >= dispCloseFrac * rng
+bool bearDisp = isDisp and close < open and (high - close) >= dispCloseFrac * rng
+
+int   nuevoDir = 0
+float nuevoTop = na
+float nuevoBot = na
+
+if bullDisp
+    idxB = buscarOrigen(true)
+    if idxB > 0
+        candB = low[idxB]
+        if liquidezLimpia(true, candB, idxB)
+            nuevoDir := 1
+            nuevoTop := high[idxB]
+            nuevoBot := candB
+if nuevoDir == 0 and bearDisp
+    idxB2 = buscarOrigen(false)
+    if idxB2 > 0
+        candB2 = high[idxB2]
+        if liquidezLimpia(false, candB2, idxB2)
+            nuevoDir := -1
+            nuevoTop := candB2
+            nuevoBot := low[idxB2]
+if nuevoDir == 0 and not na(ultPivHi) and close > ultPivHi and close > open
+    idxBos = buscarOrigen(true)
+    if idxBos > 0
+        nuevoDir := 1
+        nuevoTop := high[idxBos]
+        nuevoBot := low[idxBos]
+        ultPivHi := na
+if nuevoDir == 0 and not na(ultPivLo) and close < ultPivLo and close < open
+    idxBos2 = buscarOrigen(false)
+    if idxBos2 > 0
+        nuevoDir := -1
+        nuevoTop := high[idxBos2]
+        nuevoBot := low[idxBos2]
+        ultPivLo := na
+
+if nuevoDir != 0
+    zoneSeq += 1
+    box cajaNueva = mostrarZonas ? box.new(bar_index, nuevoTop, bar_index, nuevoBot,
+         border_color=nuevoDir == 1 ? color.lime : color.red,
+         bgcolor=color.new(nuevoDir == 1 ? color.lime : color.red, 85)) : na
+    array.push(zonas, Zona.new(nuevoDir, nuevoTop, nuevoBot, false, zoneSeq, cajaNueva))
+
+// ---------------- FVG: se conoce al cerrar la vela actual, se aplica hacia zonas YA vivas ----------------
+bool fvgAlc = low > high[2]
+bool fvgBaj = high < low[2]
+if (fvgAlc or fvgBaj) and array.size(zonas) > 0
+    int   fd   = fvgAlc ? 1 : -1
+    float fTop = fvgAlc ? low : low[2]
+    float fBot = fvgAlc ? high[2] : high
+    for i = 0 to array.size(zonas) - 1
+        z = array.get(zonas, i)
+        if z.dir == fd and not (fBot > z.top or fTop < z.bot)
+            z.tieneFVG := true
+
+// ---------------- purgar SOLO por invalidacion -- SIN limite de edad ----------------
+if array.size(zonas) > 0
+    for i = array.size(zonas) - 1 to 0
+        z = array.get(zonas, i)
+        bool invalidada = z.dir == 1 ? close < z.bot : close > z.top
+        if invalidada
+            if not na(z.caja)
+                box.delete(z.caja)
+            array.remove(zonas, i)
+        else if mostrarZonas and not na(z.caja)
+            box.set_right(z.caja, bar_index)
+
+// ---------------- sesion ----------------
+nyHour = hour(time, "America/New_York")
+nyMin  = minute(time, "America/New_York")
+nyMinTotal = nyHour * 60 + nyMin
+bool inSession = sesionInicio < sesionFin ?
+     (nyMinTotal >= sesionInicio * 60 and nyMinTotal < sesionFin * 60) :
+     (nyMinTotal >= sesionInicio * 60 or nyMinTotal < sesionFin * 60)
+
+// ---------------- armar / confirmar ----------------
+var int   armId  = -1
+var int   armDir = 0
+var float armTop = na
+var float armBot = na
+var int   armBar = na
+
+var float gEp    = na
+var float gSl    = na
+var float gRisk  = na
+var int   gDir   = 0
+var bool  gBeMoved = false
+
+if strategy.position_size == 0
+    gBeMoved := false
+    if inSession
+        if armId == -1 and array.size(zonas) > 0
+            for i = 0 to array.size(zonas) - 1
+                z = array.get(zonas, i)
+                if exigirFVG and not z.tieneFVG
+                    continue
+                liqS = liqFavorPeligro(z.dir, z.top, z.bot)
+                if excluirPeligro and liqS == 0
+                    continue
+                if exigirFavor and liqS != 100
+                    continue
+                if z.dir == 1 and z.bot - entryBuf <= low and low <= z.top + entryBuf
+                    armId := z.id
+                    armDir := 1
+                    armTop := z.top
+                    armBot := z.bot
+                    armBar := bar_index
+                    break
+                if z.dir == -1 and z.bot - entryBuf <= high and high <= z.top + entryBuf
+                    armId := z.id
+                    armDir := -1
+                    armTop := z.top
+                    armBot := z.bot
+                    armBar := bar_index
+                    break
+        else if armId != -1 and (bar_index - armBar > esperaVelas)
+            armId := -1
+
+        if armId != -1 and bar_index > armBar
+            float cuerpo = math.abs(close - open)
+            float rango2 = high - low
+            if rango2 > 0
+                if armDir == 1 and close > open and cuerpo >= cuerpoFrac * rango2 and close > armTop
+                    float ep = close
+                    float sl = math.min(armBot, low) - slBuf
+                    float r  = ep - sl
+                    if r > 0 and r <= maxRiskPts
+                        strategy.entry("Long", strategy.long)
+                        gEp := ep
+                        gSl := sl
+                        gRisk := r
+                        gDir := 1
+                        armId := -1
+                        alert("ICT Union+FVG+LiqFavor: LONG @ " + str.tostring(ep), alert.freq_once_per_bar_close)
+                else if armDir == -1 and close < open and cuerpo >= cuerpoFrac * rango2 and close < armBot
+                    float ep2 = close
+                    float sl2 = math.max(armTop, high) + slBuf
+                    float r2  = sl2 - ep2
+                    if r2 > 0 and r2 <= maxRiskPts
+                        strategy.entry("Short", strategy.short)
+                        gEp := ep2
+                        gSl := sl2
+                        gRisk := r2
+                        gDir := -1
+                        armId := -1
+                        alert("ICT Union+FVG+LiqFavor: SHORT @ " + str.tostring(ep2), alert.freq_once_per_bar_close)
+    else
+        armId := -1
+
+// ---------------- gestion (aproximada a cierre de vela -- NO intratick) ----------------
+if strategy.position_size != 0 and not na(gRisk) and gRisk > 0
+    float rNow = gDir == 1 ? (close - gEp) / gRisk : (gEp - close) / gRisk
+    if not gBeMoved and rNow >= beTrigR
+        gBeMoved := true
+    float stopActual   = gBeMoved ? gEp + gRisk * lockR * gDir : gSl
+    float targetActual = gEp + gRisk * rr2 * gDir
+    if gDir == 1
+        strategy.exit("Salida", "Long", stop=stopActual, limit=targetActual)
+    else
+        strategy.exit("Salida", "Short", stop=stopActual, limit=targetActual)
+
+plot(na)  // placeholder para mantener overlay limpio sin series extra en el pane

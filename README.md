@@ -21,28 +21,48 @@ proyecto: **ningún backtest usa información futura del precio**.
 > es inválida.** Las configuraciones de `config/CONFIGURACIONES.md` se midieron
 > con motores que tenían el séptimo look-ahead y tampoco deben usarse.
 
-### 15m — auditado, dos líneas rentables (aún no verificadas en NinjaTrader)
+### 15m — variante F, verificada tick a tick (la línea de mayor confianza del proyecto)
 
-`pine/ICT_15M_OB_Entry_v18.pine` reportaba Net $121.696 / PF 3.08 — **ese
-número era inválido**, con tres look-aheads propios ([veredicto
-completo](config/VEREDICTO_15M.md)). Corregidos, la detección de OB por
-desplazamiento con orden límite descansando en la zona no tiene ventaja
-(PF 0.99). Dos líneas causales sí la tienen, exploradas después:
+**Union (desplazamiento+BOS) + FVG + liquidez a favor, sin límite de edad de
+zona, sesión 08-13 NY**: 54/55 operaciones resueltas, **neto $4.213, PF 2.12**
+(sep-dic 2025, 3 contratos), verificado tick a tick contra el archivo real de
+ticks de MNQ — no solo modelo por vela. Drawdown máximo real: $1.637 (3
+contratos). Con 4 contratos: 87% de probabilidad de pasar una cuenta de
+evaluación TopStep 50k ($3.000 objetivo, $2.000 pérdida máxima) en mediana
+4,9 semanas (con 3 contratos: 96,7% en 7,1 semanas). Detalle completo:
+[CONFLUENCIA_Y_LIQUIDEZ.md](config/CONFLUENCIA_Y_LIQUIDEZ.md).
+
+Reemplaza la configuración anterior de esta misma línea (frescura de 3h,
+sin gate de liquidez: 24 ops, $3.060, PF 2.43) — esa sigue disponible como
+opción en `pine/automation/ICT_UnionFVG_15M_Strategy.cs` (EdadMaxVelas=12,
+ExigirLiquidezFavor=false) pero la variante F gana en frecuencia y PF
+combinados.
+
+Otras líneas exploradas, con menor confianza (no verificadas tick a tick o
+con muestra insuficiente):
 
 | línea | PF | ops/año | ver |
 |---|---|---|---|
 | Confirmación por vela de reacción, 09-11 NY | 2.70 | ~35 | [CONFIRMACION.md](config/CONFIRMACION.md) |
-| Union (desplazamiento+BOS) + FVG, 08-13 NY | 1.50 | ~140 | [CONFLUENCIA_Y_LIQUIDEZ.md](config/CONFLUENCIA_Y_LIQUIDEZ.md) |
-| **Barrido de liquidez + reversión, 09-13 NY** | **2.09** | ~79 | [CONFLUENCIA_Y_LIQUIDEZ.md](config/CONFLUENCIA_Y_LIQUIDEZ.md) |
+| Barrido de liquidez + reversión, 09-13 NY | 2.09 | ~79 | [CONFLUENCIA_Y_LIQUIDEZ.md](config/CONFLUENCIA_Y_LIQUIDEZ.md) |
 
-La última es el mejor resultado combinado (PF, drawdown, 0 años negativos en
-7) de todo el proyecto. **Ninguna de las tres se ha verificado en
-NinjaTrader todavía** — es el paso obligatorio antes de operar cualquiera.
+Ninguna de estas dos se ha verificado en NinjaTrader todavía — es el paso
+obligatorio antes de operar cualquiera que no sea la variante F.
 
 ### Herramientas
 
 - `tools/compilar.ps1` — compila el NinjaScript contra los ensamblados
   reales de NT8. Ningún archivo se copia a NinjaTrader sin pasar por aquí.
+- `pine/automation/ICT_UnionFVG_15M_Strategy.cs` — estrategia de NT8 con la
+  variante F (ver arriba), registro CSV por evento en
+  `Documents/NinjaTrader 8/export/`. Compilada y desplegada, aún sin
+  ejecutar una orden real en la plataforma — correr en Sim/Market Replay y
+  comparar contra el CSV antes de cuenta real.
+- `pine/ICT_LiquidezFavor_UnionFVG_Strategy.pine` — la misma variante F
+  portada a Pine v6 (`strategy()`) para TradingView, con el mismo
+  advertencia: su propio Strategy Tester tiene la misma ambigüedad de
+  orden intra-vela que el modelo por vela en Python — usar para señales/
+  alertas en vivo, no para confiar en su Net Profit reportado.
 - `pine/automation/ICT_5M_Scalp_v2_Strategy.cs` — estrategia de NT8 con
   registro CSV por evento en `Documents/NinjaTrader 8/export/`.
 - `pine/OB_FVG_Visualizador.pine` — visualizador v9 para auditoría discrecional
@@ -52,6 +72,14 @@ NinjaTrader todavía** — es el paso obligatorio antes de operar cualquiera.
   tendencia estructural opcional basada únicamente en pivotes confirmados.
   Es una herramienta visual: el score y la línea de tendencia todavía no son
   reglas validadas del backtester ni deben interpretarse como señal automática.
+- `web/` — herramientas publicadas como Claude Artifacts: auditoría visual
+  de operaciones y registro manual de entradas discrecionales del usuario
+  (ver [web/README.md](web/README.md) para los links en vivo).
+- `data/engine/python/experimentos_liquidez.py` — motor de experimentos
+  configurable (frescura, apilamiento, gate de liquidez, RR dinámico) que
+  produjo la variante F. Corre una batería de variantes y las vuelca a un
+  CSV con columna `variante` para filtrar/pivotear sin escribir scripts
+  nuevos.
 
 ## Contenido
 

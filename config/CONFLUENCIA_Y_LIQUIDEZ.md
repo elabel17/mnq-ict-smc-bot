@@ -125,3 +125,62 @@ convertir una mejora visual en una afirmación de rendimiento no demostrada.
   `HybridReplayValidation`, `ICT_Market_Research`) — no auditadas todavía
 - Resolver la inconsistencia encontrada en la simulación de escalado
   dinámico de contratos antes de confiar en cualquier resultado de esa idea
+
+## Variante F (2026-09-14/15): sin límite de edad + liquidez a favor
+
+Motor: `data/engine/python/experimentos_liquidez.py`. Origen: el usuario
+insistió en que la frescura de 3h (edad_max=12) era un número inventado, no
+un principio real — "sin importar cuánto lleve abandonada, si no ha sido
+tocada y tiene confluencias a favor, sigue siendo válida". Se probó
+exactamente esa heurística contra la liquidez a favor (`_liq_favor_peligro`,
+puerto de `pineV10.pine`) como reemplazo del límite de tiempo.
+
+**Resultado, verificado tick a tick (sep-dic 2025, MNQ, 3 contratos):
+54/55 operaciones, neto $4.213, PF 2.12, drawdown máximo $1.637 (26 sep-10
+oct).** Casi duplica la frecuencia de la config anterior (29→54-55 ops) sin
+perder calidad — el usuario tenía razón, el límite de tiempo dejaba
+operaciones válidas sin tomar. Dimensionamiento (bootstrap 20.000 órdenes,
+objetivo TopStep 50k $3.000 / pérdida máx $2.000): 3 contratos = 96,7% de
+pasar, mediana 7,1 semanas; 4 contratos = 87,0%, mediana 4,9 semanas.
+
+### Lo que se probó DESPUÉS y no mejoró (todo tick-verificado, no solo bar model)
+
+Una auditoría visual del usuario (ver `web/registro_manual.html` y las notas
+dejadas en `web/variante_f_chart.html`) encontró 5-7 operaciones concretas
+donde la entrada no tenía apoyo real de OB — casi todas del modo BOS, con
+30-260pts de deriva entre el toque y la confirmación. Se investigaron varias
+correcciones, ninguna sobrevivió la verificación:
+
+| hipótesis | resultado |
+|---|---|
+| RR dinámico (estirar objetivo a niveles de liquidez apilados) | Bar model prometía PF 1.59-1.62; tick real: **PF 0.42**, pérdida neta |
+| Cadena de liquidez (target al nivel más lejano de una cadena, solo puede alargar) | Bar model ya peor que el control (PF 1.65 vs 2.37) — descartado antes de tick |
+| Quitar el BE anticipado (0.4R) | Bar model prometía $10.679; tick real: **$2.570, PF 1.27**, 13/55 sin resolver en 8h (vs 1/55 con BE) |
+| Cerrar parcial 1/3 en RR1=1.5, resto a RR2 con BE | Tick real: $4.034/PF 2.07 — practicamente igual al control, no aporta |
+| Exigir BOS con los mismos filtros de calidad que el desplazamiento | Bar model PF 2.59; tick real: **$3.531/PF 2.07** — empata o pierde levemente contra el control |
+| Excluir ventana de edad 20-50h ("tierra de nadie") | Descartado antes de tick: resultó ser un proxy casi exacto de las mismas 4 operaciones BOS ya detectadas — sobreajuste a n=4, no un principio real |
+| Invalidar zona por reemplazo (zona opuesta más reciente y viva) | Colapsó de 55 a 10-12 ops con PF 0.23-0.29 en las 3 implementaciones probadas — descartado |
+| Invalidar zona por cierre en contra (sin límite de edad) | Colapsa a 1 operación — incompatible por diseño con "sin límite de edad" (casi toda zona es cruzada por el precio alguna vez en meses de historial) |
+| Entrada inmediata al tocar la zona (sin esperar vela de confirmación) | 145 ops, PF 1.58, DD $3.792 (vs 41 ops, PF 2.59, DD $1.487 con confirmación) — la espera sí aporta |
+| Ampliar sesión a 09-12+19-24 NY (horarios reales del usuario) | Bar model prometía $7.958/PF 2.07; tick real: **$1.248, PF 1.17, DD $2.307** (ya supera el límite de $2.000 con solo 3 contratos) — la sesión nocturna resultó mucho más errática de lo que el modelo por vela mostraba |
+
+**Conclusión: después de ~10 hipótesis distintas, ninguna superó de forma
+verificada a la config base.** No es evidencia de que el sistema esté
+"terminado" — es evidencia de que $4.213/PF 2.12 es un punto genuinamente
+sólido, no un número de suerte fácil de mejorar con el primer ajuste que se
+nos ocurra. El problema puntual del BOS (5-7 casos de 55) sigue sin resolver
+por falta de muestra — pendiente si aparecen más ejemplos.
+
+### Pendiente real, no resuelto todavía
+
+- La idea de "liquidez más cercana condicionando la dirección" del usuario
+  (el OB puede apuntar en una dirección, pero si la liquidez más cercana
+  está del otro lado, el precio probablemente va para allá) — nunca se
+  implementó de verdad, solo se probaron versiones parciales (gate de
+  favor/peligro, cadena de RR). Sigue siendo la hipótesis más grande sin
+  probar.
+- Recalibrar la misma lógica para 5m desde cero (los parámetros del 15m
+  copiados tal cual pierden: PF 0.91-1.20 según la gestión).
+- `web/registro_manual.html` — el usuario está registrando sus propias
+  entradas discrecionales (precio, dirección, motivo) para cruzarlas contra
+  lo que detecta el motor y encontrar el filtro que falta.

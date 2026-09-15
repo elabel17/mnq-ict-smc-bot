@@ -1,0 +1,219 @@
+<title>Registro Manual de Entradas</title>
+<style>
+  :root{
+    --bg:#0e1117; --panel:#161b22; --border:#2a3140; --text:#e6edf3; --muted:#8b96a5;
+    --green:#3fb950; --red:#f85149; --accent:#58a6ff;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){ --bg:#f6f8fa; --panel:#ffffff; --border:#d0d7de; --text:#1f2328; --muted:#57606a; }
+  }
+  :root[data-theme="dark"]{ --bg:#0e1117; --panel:#161b22; --border:#2a3140; --text:#e6edf3; --muted:#8b96a5; }
+  *{box-sizing:border-box}
+  body{background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:0}
+  .wrap{display:flex; flex-direction:column; height:100vh; min-height:600px}
+  header{padding:10px 16px; border-bottom:1px solid var(--border)}
+  header h1{font-size:15px; margin:0 0 2px; font-weight:600}
+  header p{font-size:12px; color:var(--muted); margin:0}
+  .main{display:flex; flex:1; min-height:0}
+  #chart{flex:1; min-width:0}
+  aside{width:320px; border-left:1px solid var(--border); display:flex; flex-direction:column; flex-shrink:0}
+  .form{padding:12px; border-bottom:1px solid var(--border)}
+  .form label{display:block; font-size:11px; color:var(--muted); margin:8px 0 3px}
+  .form input, .form textarea, .form select{width:100%; background:var(--bg); border:1px solid var(--border);
+    color:var(--text); font-size:12px; border-radius:4px; padding:6px 8px; font-family:inherit}
+  .form textarea{min-height:60px; resize:vertical}
+  .dirbtns{display:flex; gap:6px}
+  .dirbtn{flex:1; padding:8px 0; border-radius:6px; border:1px solid var(--border); background:transparent;
+    color:var(--muted); cursor:pointer; font-weight:700; font-size:12px}
+  .dirbtn.sel-long{background:rgba(63,185,80,.25); border-color:var(--green); color:var(--green)}
+  .dirbtn.sel-short{background:rgba(248,81,73,.25); border-color:var(--red); color:var(--red)}
+  .save-btn{width:100%; margin-top:10px; padding:9px 0; border-radius:6px; border:none;
+    background:var(--accent); color:#fff; font-weight:700; cursor:pointer; font-size:12px}
+  .save-btn:disabled{opacity:.4; cursor:not-allowed}
+  .hint{font-size:11px; color:var(--muted); padding:8px 12px}
+  .list{flex:1; overflow-y:auto}
+  .entrada{padding:8px 12px; border-bottom:1px solid var(--border); font-size:12px}
+  .entrada .row1{display:flex; justify-content:space-between; align-items:center}
+  .badge{font-size:10px; padding:1px 6px; border-radius:4px; font-weight:700}
+  .badge.long{background:rgba(63,185,80,.2); color:var(--green)}
+  .badge.short{background:rgba(248,81,73,.2); color:var(--red)}
+  .entrada .motivo{color:var(--muted); margin-top:4px; white-space:pre-wrap}
+  .del{background:none; border:none; color:var(--muted); cursor:pointer; font-size:11px}
+  .del:hover{color:var(--red)}
+  .status{font-size:11px; color:var(--muted); padding:6px 12px; border-top:1px solid var(--border)}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Registro manual de entradas</h1>
+    <p>Haz clic en el gráfico donde tú habrías entrado. Marca dirección, precio y por qué — se guarda para que Claude lo analice.</p>
+  </header>
+  <div class="main">
+    <div id="chart"></div>
+    <aside>
+      <div class="form">
+        <div id="pendingInfo" class="hint">Haz clic en una vela del gráfico para empezar.</div>
+        <label>Dirección</label>
+        <div class="dirbtns">
+          <button class="dirbtn" id="btnLong" type="button">LONG</button>
+          <button class="dirbtn" id="btnShort" type="button">SHORT</button>
+        </div>
+        <label>Precio de entrada</label>
+        <input type="number" step="0.25" id="precioInput" disabled>
+        <label>¿Por qué aquí?</label>
+        <textarea id="motivoInput" placeholder="OB + liquidez a favor + FVG, por ejemplo..." disabled></textarea>
+        <button class="save-btn" id="saveBtn" disabled>Guardar entrada</button>
+      </div>
+      <div class="list" id="lista"></div>
+      <div class="status" id="status">cargando...</div>
+    </aside>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+let chart, candleSeries;
+let db = null, localOnly = false;
+let entradas = {};  // id -> data
+let pendiente = null; // {time, dirDefault}
+let dirElegida = null;
+let markers = [];
+
+function loadLocal(){ try { return JSON.parse(localStorage.getItem("registro_manual") || "{}"); } catch(e){ return {}; } }
+function saveLocal(){ try { localStorage.setItem("registro_manual", JSON.stringify(entradas)); } catch(e){} }
+
+async function initDb(){
+  try { db = await claude.use("db"); } catch(e) { db = null; }
+  if (!db) { localOnly = true; entradas = loadLocal(); return; }
+  const snap = await db.collection("manual_trades").get();
+  snap.docs.forEach(d => { entradas[d.id] = d.data(); });
+}
+
+function initChart(){
+  const el = document.getElementById("chart");
+  chart = LightweightCharts.createChart(el, {
+    layout: { background: { color: "transparent" }, textColor: "#8b96a5" },
+    grid: { vertLines: { color: "rgba(255,255,255,0.05)" }, horzLines: { color: "rgba(255,255,255,0.05)" } },
+    timeScale: { timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: "rgba(255,255,255,0.1)" },
+    autoSize: true,
+  });
+  candleSeries = chart.addCandlestickSeries({
+    upColor: "#3fb950", downColor: "#f85149", borderVisible: false,
+    wickUpColor: "#3fb950", wickDownColor: "#f85149",
+  });
+  chart.subscribeClick((param) => {
+    if (!param.time || !param.point) return;
+    const precio = candleSeries.coordinateToPrice(param.point.y);
+    if (precio == null) return;
+    pendiente = { time: param.time };
+    document.getElementById("pendingInfo").textContent =
+      "Vela seleccionada: " + new Date(param.time * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    document.getElementById("precioInput").value = precio.toFixed(2);
+    document.getElementById("precioInput").disabled = false;
+    document.getElementById("motivoInput").disabled = false;
+    actualizarBotonGuardar();
+  });
+  window.addEventListener("resize", () => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }));
+}
+
+function barsToCandles(bars){ return bars.map(b => ({ time: b[0], open: b[1], high: b[2], low: b[3], close: b[4] })); }
+
+function actualizarBotonGuardar(){
+  const ok = pendiente && dirElegida && document.getElementById("precioInput").value && document.getElementById("motivoInput").value.trim();
+  document.getElementById("saveBtn").disabled = !ok;
+}
+
+document.getElementById("btnLong").addEventListener("click", () => {
+  dirElegida = "LONG";
+  document.getElementById("btnLong").classList.add("sel-long");
+  document.getElementById("btnShort").classList.remove("sel-short");
+  actualizarBotonGuardar();
+});
+document.getElementById("btnShort").addEventListener("click", () => {
+  dirElegida = "SHORT";
+  document.getElementById("btnShort").classList.add("sel-short");
+  document.getElementById("btnLong").classList.remove("sel-long");
+  actualizarBotonGuardar();
+});
+document.getElementById("precioInput").addEventListener("input", actualizarBotonGuardar);
+document.getElementById("motivoInput").addEventListener("input", actualizarBotonGuardar);
+
+document.getElementById("saveBtn").addEventListener("click", async () => {
+  const id = pendiente.time + "_" + dirElegida;
+  const data = {
+    time: pendiente.time,
+    fecha_utc: new Date(pendiente.time * 1000).toISOString().replace("T", " ").slice(0, 19),
+    dir: dirElegida,
+    precio: parseFloat(document.getElementById("precioInput").value),
+    motivo: document.getElementById("motivoInput").value.trim(),
+    creada: new Date().toISOString(),
+  };
+  entradas[id] = data;
+  if (localOnly) { saveLocal(); }
+  else { try { await db.doc("manual_trades/" + id).set(data); } catch(e) { console.error(e); } }
+  pendiente = null; dirElegida = null;
+  document.getElementById("pendingInfo").textContent = "Haz clic en otra vela para agregar otra entrada.";
+  document.getElementById("precioInput").value = ""; document.getElementById("precioInput").disabled = true;
+  document.getElementById("motivoInput").value = ""; document.getElementById("motivoInput").disabled = true;
+  document.getElementById("btnLong").classList.remove("sel-long");
+  document.getElementById("btnShort").classList.remove("sel-short");
+  document.getElementById("saveBtn").disabled = true;
+  renderTodo();
+});
+
+async function borrar(id){
+  delete entradas[id];
+  if (localOnly) { saveLocal(); }
+  else { try { await db.doc("manual_trades/" + id).delete(); } catch(e) { console.error(e); } }
+  renderTodo();
+}
+
+function renderLista(){
+  const lista = document.getElementById("lista");
+  const ids = Object.keys(entradas).sort((a, b) => entradas[b].time - entradas[a].time);
+  lista.innerHTML = ids.map(id => {
+    const e = entradas[id];
+    return `<div class="entrada">
+      <div class="row1">
+        <span><span class="badge ${e.dir === 'LONG' ? 'long' : 'short'}">${e.dir}</span> ${e.fecha_utc}</span>
+        <button class="del" data-id="${id}">borrar</button>
+      </div>
+      <div>entry ${e.precio}</div>
+      <div class="motivo">${e.motivo}</div>
+    </div>`;
+  }).join("") || '<div class="hint">Todavia no hay entradas registradas.</div>';
+  lista.querySelectorAll(".del").forEach(btn => btn.addEventListener("click", () => borrar(btn.dataset.id)));
+}
+
+function renderMarkers(){
+  const ids = Object.keys(entradas);
+  markers = ids.map(id => {
+    const e = entradas[id];
+    return {
+      time: e.time, position: e.dir === "LONG" ? "belowBar" : "aboveBar",
+      color: e.dir === "LONG" ? "#3fb950" : "#f85149",
+      shape: e.dir === "LONG" ? "arrowUp" : "arrowDown",
+      text: e.dir,
+    };
+  }).sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(markers);
+}
+
+function renderTodo(){
+  renderLista();
+  renderMarkers();
+  document.getElementById("status").textContent =
+    Object.keys(entradas).length + " entradas guardadas — " +
+    (localOnly ? "solo en este navegador" : "Claude puede leerlas directamente");
+}
+
+initChart();
+Promise.all([
+  fetch("variante_f_visual_data_15m.json").then(r => r.json()),
+  initDb(),
+]).then(([d]) => {
+  candleSeries.setData(barsToCandles(d.bars));
+  renderTodo();
+});
+</script>
