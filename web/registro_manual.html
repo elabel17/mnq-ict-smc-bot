@@ -79,6 +79,16 @@ let pendiente = null; // {time, dirDefault}
 let dirElegida = null;
 let markers = [];
 
+function toNY(epochSeconds){
+  const d = new Date(epochSeconds * 1000);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false
+  }).formatToParts(d);
+  const get = t => parts.find(p => p.type === t).value;
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+}
+
 function loadLocal(){ try { return JSON.parse(localStorage.getItem("registro_manual") || "{}"); } catch(e){ return {}; } }
 function saveLocal(){ try { localStorage.setItem("registro_manual", JSON.stringify(entradas)); } catch(e){} }
 
@@ -108,7 +118,8 @@ function initChart(){
     if (precio == null) return;
     pendiente = { time: param.time };
     document.getElementById("pendingInfo").textContent =
-      "Vela seleccionada: " + new Date(param.time * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+      "Vela seleccionada: " + toNY(param.time) + " hora NY  (" +
+      new Date(param.time * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC)";
     document.getElementById("precioInput").value = precio.toFixed(2);
     document.getElementById("precioInput").disabled = false;
     document.getElementById("motivoInput").disabled = false;
@@ -176,9 +187,10 @@ function renderLista(){
     const e = entradas[id];
     return `<div class="entrada">
       <div class="row1">
-        <span><span class="badge ${e.dir === 'LONG' ? 'long' : 'short'}">${e.dir}</span> ${e.fecha_utc}</span>
+        <span><span class="badge ${e.dir === 'LONG' ? 'long' : 'short'}">${e.dir}</span> ${toNY(e.time)} NY</span>
         <button class="del" data-id="${id}">borrar</button>
       </div>
+      <div class="hint" style="padding:0;margin-top:1px">${e.fecha_utc} UTC</div>
       <div>entry ${e.precio}</div>
       <div class="motivo">${e.motivo}</div>
     </div>`;
