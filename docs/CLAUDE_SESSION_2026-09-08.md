@@ -1051,3 +1051,180 @@ Archivo canónico actualizado: `pine/OB_FVG_Visualizador.pine` (título interno
 `OB + FVG Visualizador v9`). La aprobación del usuario es visual/discrecional;
 no sustituye la validación causal pendiente del score completo ni convierte
 la línea estructural en una regla automática probada.
+
+## 🔧 SESIÓN 2026-09-15 — v10/v11/v12 del Pine, plataforma de registro manual, y el primer cruce real contra trades del usuario
+
+El usuario llegó con una versión **v10** del visualizador, escrita por la otra
+sesión en su PC personal (`pine/pineV10.pine` / `.pine.txt`), con evolución
+sustancial sobre v9: penalización por mitigación (toques + profundidad de
+penetración), ciclo de vida completo del FVG (abierto/mitigado≥50%/relleno),
+liquidez ponderada por distancia+acumulación+ATR (`liqComponentePonderadoDe`),
+dos candidatos direccionales simultáneos (alcista/bajista más cercanos), línea
+de tendencia estructural. Esta sesión trabajó **sobre ese archivo**, no sobre
+el v9 anterior — es el canónico vigente desde aquí.
+
+### Bug real encontrado y corregido: el FVG nunca se vinculaba retroactivamente
+
+El usuario mostró un OB "sinFVG" que a simple vista sí tenía un hueco cerca.
+Causa: el bloque de vínculo FVG-OB solo corría en el instante exacto en que
+el hueco se formaba, comprobando contra los OB YA existentes en ese momento.
+Como lo normal es que el hueco se abra primero y la vela de desplazamiento
+que confirma el OB llegue unas velas después, el FVG nunca se revisaba
+retroactivamente y la zona quedaba "sinFVG" para siempre.
+
+**Fix (v11):** historial acotado de FVG sin vincular (`fvgPendBar/Top/Bot/Dir`,
+mismo patrón que `sweepBar` para liquidez, cap 100 entradas). Cuando un FVG no
+encuentra zona viva al formarse, se guarda como pendiente; cuando se crea un
+OB nuevo, se revisa ese historial con el mismo criterio (solape real o misma
+pierna) antes de decidir si nace con FVG. También se recuperó el dibujo de la
+línea punteada del FVG (`mostrarFVG` estaba declarado pero mal conectado) —
+ahora solo se dibuja para FVG que SÍ quedan vinculados a un OB, no cada hueco
+suelto, para no generar ruido visual.
+
+### Liquidez: separar "cúmulo" de "seguida" (v12)
+
+El usuario notó que veía menos líneas de liquidez que antes. Causa: la lógica
+de "iguales" fusionaba pivotes cercanos en una sola línea (más gruesa),
+perdiendo la identidad de cada nivel individual. Para el usuario ambas señales
+importan por separado: cobertura (muchos niveles sueltos) vs peso (varios
+apilados casi al mismo precio). **Fix:** cada pivote confirmado SIEMPRE crea
+su propia línea individual (fucsia/teal, sin fusionar); por separado, cuando
+2+ niveles caen dentro de la tolerancia de "iguales" se dibuja una marca
+distinta (franja dorada + etiqueta "cúmulo xN") sin tocar las líneas
+individuales.
+
+### Liquidez "a favor" vs "en contra", con dos rondas de fix de calibración
+
+A pedido del usuario ("una cosa puede anular la otra") se agregó un tercer
+estado al componente de liquidez del score: 100% si nace tras un barrido
+confirmado a su favor **o** si hay liquidez sin cazar del lado que favorece
+la dirección del trade (imán/objetivo); 0% si hay liquidez sin cazar del lado
+que invalida la zona (el riesgo manda sobre el objetivo favorable si ambos
+aplican). Dos bugs de calibración encontrados y corregidos con ejemplos reales
+del usuario:
+
+1. Un "neutral" de 50% quedaba por ENCIMA del baseline viejo (0% sin barrido
+   de soporte) — si el detector de peligro no capturaba un caso real, el
+   score subía en vez de bajar. Fix: sin evidencia positiva clara, el
+   componente vuelve a 0%, nunca sube por accidente.
+2. Las distancias de "peligro" (36pts fijos) y "favor" (72pts fijos) estaban
+   descalibradas y en direcciones opuestas al problema real — confirmado con
+   una zona de ~40pts que subió de 49% a 69% por agarrar estructura lejana no
+   relacionada. Fix: ambas distancias ahora son relativas al alto de la
+   propia zona (`alto * liqCercaPts`), misma escala para las dos.
+
+Se agregó un modo de diagnóstico (`mostrarDesglose`) que muestra los 4-5
+componentes del score directamente en el texto de la caja (`49% (V:60 R:20
+L:0 B:50 F:0)`), para dejar de ajustar a ciegas desde capturas de pantalla.
+
+### Plataforma de registro manual (`web/registro_manual.html`)
+
+El usuario, tras probar el motor con datos de tick de su PC personal y
+encontrar muchos BE/SL directos (aunque rentable), construyó una página
+(Claude Artifact, `https://claude.ai/artifact/BwCwC62ncXA17PFNxwGkeN`) para
+registrar a mano dónde él habría entrado — clic en una vela, dirección,
+precio, motivo — guardado en la colección `manual_trades` de la base de datos
+del Artifact, para cruzarlo contra lo que detecta el motor automático.
+
+**Dos bugs de zona horaria encontrados y corregidos**, ambos con el mismo
+patrón: el dato se guardaba correctamente en UTC, pero se MOSTRABA sin
+etiqueta ni conversión, y el usuario lo leía como si ya fuera su hora local:
+
+1. La lista de entradas mostraba el campo `fecha_utc` pelado, sin decir
+   "UTC". Fix: cada tarjeta ahora muestra primero la hora NY (clara,
+   calculada con `Intl.DateTimeFormat`) y el UTC como referencia secundaria.
+2. **El eje del propio gráfico** (librería `lightweight-charts`) renderiza
+   SIEMPRE en UTC — verificado leyendo el bundle minificado (solo usa
+   `getUTCHours`/`getUTCMonth`/etc., nunca hora local del navegador, sin
+   opción de configurarlo). El usuario reportaba ver volumen a las 12-2pm en
+   el eje, que en realidad es 08-10am NY en septiembre. Fix: se "engaña" a la
+   librería sumando el offset de NY (vía `Intl`, con DST automático) a cada
+   timestamp antes de dibujarlo — como ella renderiza en UTC, el resultado
+   visual termina siendo la hora NY real. Los datos guardados (`time`/
+   `fecha_utc`) se mantienen en UTC real sin cambios; solo se convierte de
+   vuelta al leer el clic del usuario, antes de guardar.
+
+### Primer cruce real: 10 trades manuales contra el motor causal
+
+Con los primeros 7-10 trades registrados (2025-09-18 a 2025-10-03, precios
+~24500-25200, consistente con NQ/MNQ de esa fecha), se corrieron dos scripts
+(`claude_validar_trades_manuales.py`, `claude_validar_trades_manuales2.py`)
+contra el histórico real de 15m:
+
+- La primera versión (usando `v_nivel.sel_real`, que solo permite una
+  posición abierta a la vez) confundía "el motor no detectó nada" con "el
+  motor ya estaba en otra operación" — se corrigió reconstruyendo solo la
+  DETECCIÓN de zonas, sin gestión de posición.
+- **Hallazgo principal:** los 2 trades que el usuario mismo marcó como
+  "débiles" (sin FVG / liquidez en contra) tuvieron MUCHAS zonas coincidentes
+  bajo detección pura (hasta 9 en el peor caso) — la detección mecánica de
+  zonas **no es selectiva por sí sola**, habría tomado esas entradas
+  perdedoras con la misma o mayor facilidad que las ganadoras. El filtro que
+  sí distingue (score de 5 factores) solo existe en el Pine, nunca estuvo
+  conectado al motor de selección de trades real.
+- **Corrección importante sobre la marcha:** el primer corte usaba "la zona
+  más cercana en esa dirección" aunque estuviera a 50-70pts, lo cual es
+  engañoso (el usuario correctamente objetó "yo no trade a 70 puntos de
+  ningún OB"). Con un criterio honesto (≤20pts = coincidencia real), **la
+  mitad de los 10 trades registrados no tienen ninguna zona real detectada
+  cerca** — puntos ciegos genuinos de la detección mecánica (escaneo de
+  vela de origen a 10 velas atrás, umbral de desplazamiento), no solo falta
+  de filtro. Pendiente investigar esos casos específicos con más contexto
+  de velas cuando haya un lote más grande.
+- **Validación del precio de entrada:** el usuario sospechaba que sus
+  entradas no usan buffer. Confirmado con `claude_validar_buffer_trades_
+  manuales.py`: en los trades con zona coincidente, la entrada está a 1-8pts
+  del borde PURO de la mecha (modo `mecha` de `v_nivel.py`), no del borde+8pts
+  (modo `aire`, el único que el backtest validado asume ejecutable). Esto es
+  una discrepancia real sin resolver: `aire` se eligió como base porque
+  `mecha` se consideró no ejecutable de forma realista (limit order exacto en
+  el extremo de la mecha, difícil de llenar sin slippage/rechazo) — pero si
+  la ejecución real del usuario sí logra entradas tan pegadas al borde, habría
+  que re-testear con `mecha` como base. **No resuelto, pendiente.**
+
+### Otros datos cualitativos aportados por el usuario (para el próximo lote)
+
+- Ventana de entrada declarada: 7-11 AM (hora NY/RD, mismo huso en
+  septiembre) — pero NINGUNO de los 10 trades ya registrados cae ahí
+  (posiblemente porque el campo de hora capturaba la vela de referencia, no
+  la ejecución real — no confirmado). El usuario prefirió esperar a un lote
+  con hora de ejecución clara antes de validar la ventana o construir un
+  filtro de acumulación/consolidación, en vez de forzarlo sobre datos que no
+  calzan.
+- A las 5 AM NY el mercado NO cierra (el único cierre real de CME Globex para
+  MNQ es 5-6 PM NY) — es solo iliquidez/spread ancho de la sesión asiática
+  temprana, no un cierre real.
+- Hipótesis del usuario, coherente con lo ya validado (`CONFIRMACION.md`, PF
+  1.99 con entrada por confirmación vs 0.99 al toque directo): esperar una
+  vela de reacción de 5m antes de entrar no le habría costado los TP reales
+  ("los trades que se dieron se habrían dado igual"), y sí filtraría entradas
+  que fallan antes de confirmarse. No probado todavía contra este lote
+  específico (a petición del usuario, se prueba con el motor más adelante,
+  con más trades).
+- Trade del 2025-10-01 registrado deliberadamente como ejemplo NEGATIVO/
+  didáctico (el usuario aclara "si es que operaba, que lo dudo"): un SHORT
+  con OB+FVG limpio que igual habría perdido porque la liquidez estaba
+  detrás — ilustra exactamente el componente de "liquidez en contra" que se
+  agregó al score esta sesión.
+
+### Pendiente para retomar
+
+1. Resolver la discrepancia `mecha` vs `aire` como modo de entrada base —
+   depende de confirmar qué tan cerca del borde puro se llena realmente la
+   ejecución del usuario en su bróker.
+2. Investigar los 5 casos "ciegos" (de 10) donde la detección mecánica no
+   encontró ninguna zona real cerca — ver si es ventana de escaneo de origen
+   muy corta, umbral de desplazamiento, o un tipo de estructura no
+   contemplada en absoluto.
+3. Validar la ventana horaria 7-11 NY y el filtro de acumulación/consolidación
+   una vez haya un lote de trades con hora de ejecución clara y sin ambigüedad.
+4. Probar la hipótesis de "confirmación de 5m no cuesta los TP reales" contra
+   el lote de trades manuales cuando sea más grande.
+5. Llevar el score de 5 factores (o al menos liquidez+FVG+sesgo) del Pine al
+   motor de Python real (`v_nivel.py` o sucesor) — sigue siendo el hueco
+   estructural más grande: la lógica que sí filtra bien vive aislada en el
+   visualizador, nunca conectada al motor que selecciona/ejecuta trades.
+6. Sigue pendiente desde sesiones anteriores: verificar `sweep_reversion.py`
+   en NinjaTrader con predicción registrada, y la "variante F" mencionada en
+   el commit `0ce9c11` (verificada tick a tick por la otra sesión) — no
+   revisada todavía en esta sesión.
